@@ -1,16 +1,14 @@
-# bot_with_cryptobot_ton.py
+# full_salebot.py
 """
-Полный Telegram-бот с приёмом оплат через CryptoBot (чек-API).
-- ПРИНИМАЕМ в конечной валюте TON (asset = "TON")
-- Создаём чек через CryptoBot API, отправляем pay_url + QR пользователю
-- Принимаем webhook (IPN) от CryptoBot и отмечаем заказ как 'оплачен'
-- Профиль пользователя (просмотр заказов, отмена)
-- Админ-панель (просмотр всех заказов, изменение статуса)
-- Хранение данных в data.json
-Requirements:
-pip install pyTelegramBotAPI Flask requests qrcode[pil]
-Запуск: python bot_with_cryptobot_ton.py
-Перед запуском: укажи PUBLIC_WEBHOOK_URL (https://.../cryptobot/ipn) — можно через ngrok
+Полный рабочий Telegram-бот с интеграцией CryptoBot (приём оплаты в TON),
+профилем пользователя, историей заказов, админ-панелью, хранением данных в data.json,
+созданием чеков в CryptoBot + обработкой IPN (webhook) через Flask.
+
+Запуск:
+- На локальной машине: нужен публичный адрес (ngrok) для IPN, либо запускай в режиме polling.
+- На Render/Railway: webhook mode (Flask обработает POST от CryptoBot и Telegram).
+- Перед запуском: установить зависимости:
+    pip install pyTelegramBotAPI Flask requests qrcode[pil]
 """
 
 import os
@@ -19,32 +17,33 @@ import threading
 import requests
 import qrcode
 from io import BytesIO
-from flask import Flask, request, jsonify, abort
-
+from flask import Flask, request, jsonify
 import telebot
 from telebot import types
+import time
+from datetime import datetime
 
 # ----------------------- КОНФИГУРАЦИЯ -----------------------
-# Твой Telegram бот токен (оставил тот, что был ранее)
-BOT_TOKEN = "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
+# 1) Токен Telegram-бота (BotFather) — обязательно проверь.
+BOT_TOKEN = "PUT_YOUR_BOTFATHER_TOKEN_HERE"  # <-- ВСТАВЬ СЮДА токен от @BotFather
 
-# --- НОВЫЙ CryptoBot API Token (вставлен) ---
-CRYPTOPAY_API_TOKEN = "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"
+# 2) Токен CryptoBot (Crypto Pay API token)
+CRYPTOPAY_API_TOKEN = "PUT_YOUR_CRYPTOPAY_TOKEN_HERE"  # <-- ВСТАВЬ СЮДА токен от @CryptoBot
 
-# Публичный URL (где доступен Flask app). Пример: https://abcd1234.ngrok.io
-# Укажи свой публичный URL, который проксирует Flask.
-PUBLIC_WEBHOOK_URL = os.environ.get("PUBLIC_WEBHOOK_URL") or "https://<YOUR_NGROK_OR_DOMAIN>/cryptobot/ipn"
+# 3) Публичный URL для приёма IPN от CryptoBot (например https://your-app.onrender.com/cryptobot/ipn)
+#    На Render/Railway это будет домен твоего сервиса + /cryptobot/ipn
+PUBLIC_WEBHOOK_URL = os.environ.get("PUBLIC_WEBHOOK_URL") or "https://<YOUR-PROJECT>.onrender.com/cryptobot/ipn"
 
-# Админ id (куда приходят уведомления и кто администрирует)
-ADMIN_ID = 1942740947  # замени, если нужно
+# Админ ID (твой Telegram ID) — уведомления о заказах
+ADMIN_ID = 1942740947  # замени на свой ID если нужно
 
 # Путь до файла с данными
 DATA_FILE = "data.json"
 
-# Мы принимаем и конвертируем ВСЕ платежи в TON на стороне CryptoBot (asset = "TON")
+# Валюта, в которую будут конвертироваться все платежи (вывод для тебя)
 TARGET_ASSET = "TON"
 
-# Офферы (пакеты) — формат: ключ категории -> {amount_str: price_rub}
+# Предустановленные пакеты (показываем пользователю, кнопки)
 OFFERS = {
     "sub": {"100": 100, "500": 400, "1000": 700},
     "view": {"1000": 50, "5000": 200, "10000": 350},
@@ -52,17 +51,21 @@ OFFERS = {
 }
 PRETTY = {"sub": "Подписчики", "view": "Просмотры", "com": "Комментарии"}
 
-# CryptoBot API endpoints
 CRYPTO_API_BASE = "https://pay.crypt.bot/api"
 
 # ----------------------- ИНИЦИАЛИЗАЦИЯ -----------------------
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# загружаем/создаём data.json
+# Загружаем данные или создаём структуру
 if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {"users": {}, "invoices": {}, "user_state": {}}
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 else:
     data = {"users": {}, "invoices": {}, "user_state": {}}
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -93,7 +96,7 @@ def add_order(chat_id, category_key, amount):
         "status": "ожидает оплаты",
         "invoice_id": None,
         "pay_url": None,
-        "created_at": None
+        "created_at": datetime.utcnow().isoformat()
     }
     data["users"][cid]["orders"].append(order)
     save_data()
@@ -122,8 +125,6 @@ def update_order_status(chat_id, order_id, new_status):
 def create_cryptobot_invoice(amount_value, asset_target, order_uid, description, callback_url=None):
     """
     Создаёт чек в CryptoBot (через /createInvoice). Возвращает dict ответа.
-    Заголовок: Crypto-Pay-API-Token
-    Тело: { amount: "1.23", asset: "TON", callback: "...", payload: "...", description: "..." }
     """
     url = CRYPTO_API_BASE + "/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTOPAY_API_TOKEN, "Content-Type": "application/json"}
@@ -146,7 +147,6 @@ def create_cryptobot_invoice(amount_value, asset_target, order_uid, description,
 def get_invoice_status(invoice_id):
     """
     Запрос статуса инвойса (fallback проверка).
-    Endpoint: /getInvoice?invoiceId=...
     """
     url = CRYPTO_API_BASE + "/getInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTOPAY_API_TOKEN}
@@ -184,35 +184,43 @@ def cryptobot_ipn():
             status_field = payload[key]
             break
 
+    # payload / custom field (мы передаем order_uid в поле 'payload')
     custom_payload = payload.get("payload") or payload.get("order") or payload.get("comment") or payload.get("merchant_order_id")
 
+    # Если нет invoice_id — попытаемся найти по payload
     if not invoice_id and custom_payload:
         for inv, rec in data.get("invoices", {}).items():
             if str(rec.get("order_uid")) == str(custom_payload):
                 invoice_id = inv
                 break
 
+    # Сохраним сам входящий payload для логов
     if invoice_id:
         data.setdefault("invoices", {})[str(invoice_id)] = {"payload": payload}
         save_data()
 
+    # Нормализация статуса
     st = None
     if status_field:
         st = str(status_field).lower()
 
     paid_indicators = {"paid", "success", "finished", "confirmed", "complete"}
     if st and any(p in st for p in paid_indicators):
+        # отмечаем заказ как оплачен, если найдём mapping
+        # Найдём mapping invoice_id -> chat_id, order_id
         rec = data.get("invoices", {}).get(str(invoice_id))
         if rec and rec.get("chat_id") and rec.get("order_id"):
             chat_id = rec["chat_id"]
             order_id = rec["order_id"]
             update_order_status(chat_id, order_id, "оплачен")
+            # уведомление пользователю
             try:
                 bot.send_message(chat_id, f"🔔 Платёж подтверждён. Заказ #{order_id} помечен как оплачен.")
             except Exception:
                 pass
             return jsonify({"ok": True}), 200
         else:
+            # пытаемся найти по payload (order_uid)
             order_uid = custom_payload
             if order_uid and isinstance(order_uid, str) and "_" in order_uid:
                 try:
@@ -227,6 +235,7 @@ def cryptobot_ipn():
                     return jsonify({"ok": True}), 200
                 except Exception:
                     pass
+    # другие статусы просто логируем
     return jsonify({"ok": True}), 200
 
 # ----------------------- Telegram bot: UI и логика -----------------------
@@ -237,12 +246,15 @@ def main_menu_inline():
     kb.add(types.InlineKeyboardButton("👁 Купить просмотры", callback_data="menu_view"))
     kb.add(types.InlineKeyboardButton("💬 Купить комментарии", callback_data="menu_com"))
     kb.add(types.InlineKeyboardButton("👤 Профиль", callback_data="profile"))
-    kb.add(types.InlineKeyboardButton("🔐 Админ", callback_data="admin_panel"))
+    if str(ADMIN_ID):
+        # показываем админ кнопку только если задан ADMIN_ID (для безопасного доступа)
+        kb.add(types.InlineKeyboardButton("🔐 Админ", callback_data="admin_panel"))
     return kb
 
 def packages_markup(cat_key):
     kb = types.InlineKeyboardMarkup(row_width=1)
     for amt, price in OFFERS.get(cat_key, {}).items():
+        # убираем лишние единицы (точное число) — отображаем просто amt
         kb.add(types.InlineKeyboardButton(f"{amt} — {price}₽", callback_data=f"order_{cat_key}_{amt}"))
     kb.add(types.InlineKeyboardButton("✏ Своя сумма", callback_data=f"custom_{cat_key}"))
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back"))
@@ -266,7 +278,8 @@ def callback_handler(call):
         bot.edit_message_text("👁 Выбери пакет просмотров:", cid, call.message.message_id, reply_markup=packages_markup("view"))
         return
     if data_call == "menu_com":
-        bot.edit_message_text("💬 Выбери пакет комментариев:", cid, call.message.message_id, reply_markup=packages_markup("com"))
+        bot.edit_message_text("💬 Выбери пакет комментариев:", cid, call.message.chat.id, call.message.message_id, reply_markup=packages_markup("com"))
+        # Note: fallback in case of api differences
         return
     if data_call == "back":
         bot.edit_message_text("🧸 Выбери услугу:", cid, call.message.message_id, reply_markup=main_menu_inline())
@@ -287,15 +300,18 @@ def callback_handler(call):
 
     # фиксированный пакет: создаём заказ и создаём чек
     if data_call.startswith("order_"):
-        _, category, amt_str = data_call.split("_", 2)
+        try:
+            _, category, amt_str = data_call.split("_", 2)
+        except ValueError:
+            bot.answer_callback_query(call.id, "Неверные данные")
+            return
         amount = int(amt_str)
-        # создаём запись заказа
         order_id = add_order(cid, category, amount)
-        # Формула цены: возьмём price_rub из OFFERS и конвертируем в USD для выставления в чеке.
+        # Формула цены: берём price_rub из OFFERS
         price_rub = OFFERS.get(category, {}).get(amt_str, None)
         if price_rub is None:
             price_rub = amount  # fallback
-        # Для demo: 100 RUB = 1 USD
+        # конвертация RUB -> USD: ставим примерный курс 100 RUB = 1 USD (подставь реальный)
         price_usd = round(price_rub / 100.0, 2)
         order_uid = f"{cid}_{order_id}"
         callback_url = PUBLIC_WEBHOOK_URL
@@ -334,6 +350,7 @@ def callback_handler(call):
             return
         max_offer = max(int(x) for x in offers.keys())
         min_allowed = max_offer + 1
+        # запомним ожидание ввода
         data.setdefault("user_state", {})[str(cid)] = {"waiting_custom": True, "category": category, "min_allowed": min_allowed}
         save_data()
         bot.send_message(cid, f"✏ Введите количество для {PRETTY.get(category)} (целое, минимум {min_allowed}):")
@@ -367,6 +384,7 @@ def on_text(m):
         if isinstance(resp, dict) and resp.get("error"):
             bot.send_message(cid, "Ошибка при создании чека. Сообщи админу.")
             bot.send_message(ADMIN_ID, f"CryptoBot create error: {resp}")
+            # очистим state
             data["user_state"].pop(str(cid), None)
             save_data()
             return
@@ -435,7 +453,11 @@ def cancel_order_callback(call):
             save_data()
             bot.answer_callback_query(call.id, "Заказ отменён")
             bot.edit_message_text("Заказ отменён ✅", call.message.chat.id, call.message.message_id)
-            bot.send_message(ADMIN_ID, f"Пользователь {cid} отменил заказ #{idx}")
+            # уведомим админа
+            try:
+                bot.send_message(ADMIN_ID, f"Пользователь {cid} отменил заказ #{idx}")
+            except Exception:
+                pass
             return
     bot.answer_callback_query(call.id, "Заказ не найден")
 
@@ -492,7 +514,10 @@ def admin_set(call):
             if o["id"] == order_idx:
                 o["status"] = new_status
                 save_data()
-                bot.send_message(ADMIN_ID, f"Статус заказа {user_id}#{order_idx} изменён на {new_status}")
+                try:
+                    bot.send_message(ADMIN_ID, f"Статус заказа {user_id}#{order_idx} изменён на {new_status}")
+                except Exception:
+                    pass
                 try:
                     bot.send_message(int(user_id), f"🔔 Статус вашего заказа #{order_idx} обновлён: {new_status}")
                 except Exception:
@@ -502,15 +527,60 @@ def admin_set(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"Ошибка: {e}")
 
-# ----------------------- Запуск Flask + Bot -----------------------
+# ----------------------- Запуск Flask + Bot (для локальной отладки через polling)
+# На продакшне (Render/Railway) лучше использовать webhook mode для Telegram.
 def run_flask():
+    # Flask слушает PUBLIC_WEBHOOK_URL path /cryptobot/ipn
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
 
-def run_bot():
+def run_bot_polling():
     bot.infinity_polling(timeout=60, long_polling_timeout=20)
 
-if __name__ == "__main__":
-    print("Запускаю Flask (IPN) и Telegram бот...")
+# Если хочешь - можно запустить и Flask, и polling в отдельных потоках (удобно для локальной отладки),
+# но на хостингах (Render/Railway) используем webhook подход для Telegram — см. ниже.
+if __name__ == "__main__" and os.environ.get("RUN_MODE", "local") == "local":
+    print("Запускаю Flask (IPN) и Telegram бот (polling)...")
     t = threading.Thread(target=run_flask, daemon=True)
     t.start()
-    run_bot()
+    run_bot_polling()
+
+# ----------------------- Webhook mode support (для Render/Heroku/Railway)
+# Если переменная окружения USE_WEBHOOK="1", мы экспортируем Flask endpoints для Telegram webhook:
+#   /<BOT_TOKEN> - Telegram will POST updates here
+#   /cryptobot/ipn - CryptoBot IPN handler (implemented above)
+#
+# Для Render: установи ENV USE_WEBHOOK=1 и PUBLIC_WEBHOOK_URL = https://your-app.onrender.com/cryptobot/ipn
+if os.environ.get("USE_WEBHOOK") == "1":
+    @app.route('/' + BOT_TOKEN, methods=['POST'])
+    def telegram_webhook():
+        json_str = request.get_data().decode('UTF-8')
+        try:
+            update = telebot.types.Update.de_json(json_str)
+            bot.process_new_updates([update])
+        except Exception as e:
+            # лог ошибок
+            print("Webhook error:", e)
+        return "OK", 200
+
+    # on startup, set webhook for Telegram to point to /<BOT_TOKEN>
+    def set_telegram_webhook():
+        # compose webhook URL
+        domain = os.environ.get("WEB_DOMAIN")  # expected e.g. https://my-app.onrender.com
+        if not domain:
+            print("WEB_DOMAIN not set, webhook not configured.")
+            return
+        webhook_url = domain.rstrip("/") + "/" + BOT_TOKEN
+        try:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            bot.set_webhook(url=webhook_url)
+            print("Telegram webhook set to:", webhook_url)
+        except Exception as e:
+            print("Failed to set telegram webhook:", e)
+
+    # Set webhook when starting Flask via WSGI environment (call manually in the entrypoint)
+    # You can call set_telegram_webhook() from your start script.
+
+# ========================================================================
+# END OF FULL FILE
+# ========================================================================
