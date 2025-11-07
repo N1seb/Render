@@ -35,10 +35,10 @@ from telebot import types
 # ----------------------- НАСТРОЙКИ (вставь свои значения) -----------------------
 
 # Telegram Bot token (от BotFather) — обязательно вставь свой рабочий токен
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_BOTFATHER_BOT_TOKEN_HERE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
 
 # CryptoBot API token (API key) — обязательно вставь
-CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "PUT_YOUR_CRYPTOPAY_TOKEN_HERE"
+CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"
 
 # Админ Telegram ID (для уведомлений и админ-панели)
 ADMIN_ID = int(os.environ.get("ADMIN_ID") or 1942740947)
