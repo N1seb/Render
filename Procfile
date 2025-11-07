@@ -1,1 +1,1 @@
-python SaleTest.py
+web: python3 SaleTest.py
