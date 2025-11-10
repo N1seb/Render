@@ -357,9 +357,50 @@ def packages_markup(cat_key):
 def currency_selection_markup(order_ref:str):
     kb = types.InlineKeyboardMarkup(row_width=3)
     for code, _ in AVAILABLE_ASSETS:
-        kb.add(types.InlineKeyboardButton(f"{code}", callback_data=f"pay_asset_{order_ref}_{code}"))
+        chat_str, order_str = order_ref.split("_", 1)
+        kb.add(types.InlineKeyboardButton(f"{code}", callback_data=f"pay_asset_{chat_str}_{order_str}_{code}"))
+
     kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_payment"))
     return kb
+
+
+def convert_price_rub_to_asset(price_rub: float, asset: str) -> float:
+    """
+    Конвертируем RUB -> asset (USDT/TON/CRYPTO)
+    через публичный API coingecko
+    """
+    asset = asset.upper()
+
+    # если оплата в RUB — ничего не конвертируем
+    if asset == "RUB":
+        return round(price_rub, 2)
+
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "tether,toncoin",
+                "vs_currencies": "rub"
+            },
+            timeout=10
+        )
+        j = r.json()
+
+        if asset == "USDT":
+            rub_price = j["tether"]["rub"]
+            return round(price_rub / rub_price, 6)
+
+        if asset == "TON":
+            rub_price = j["toncoin"]["rub"]
+            return round(price_rub / rub_price, 6)
+
+        # если крипты нет в API — fallback
+        return round(price_rub / 100, 6)
+
+    except Exception:
+        # если API упал — безопасный fallback
+        return round(price_rub / 100, 6)
+
 
 # -------------------------
 # In-memory states (short-lived)
@@ -442,8 +483,16 @@ def cb_all(call):
             bot.answer_callback_query(call.id, "Неверные данные оплаты")
             return
         # order_ref is like "chatid-orderid" or "chatid_orderid" — we will use chatid_orderid created below
-        if "_" in order_ref:
-            chat_str, orderid_str = order_ref.split("_", 1)
+# currency pay button: format pay_asset_{chatid}_{orderid}_{ASSET}
+if data.startswith("pay_asset_"):
+    try:
+        _, chat_str, orderid_str, asset = data.split("_", 3)
+        order_chat = int(chat_str)
+        order_id = int(orderid_str)
+    except:
+        bot.answer_callback_query(call.id, "Неверный формат заказа")
+        return
+
             try:
                 order_chat = int(chat_str); order_id = int(orderid_str)
             except:
@@ -464,12 +513,8 @@ def cb_all(call):
         price_rub = float(row["price"])
         # quick conversion demo (RUB->USD) - you can replace with real rates if needed
         EXAMPLE_RUB_TO_USD = 100.0
-        if asset.upper() == "USD":
-            pay_amount = round(price_rub / EXAMPLE_RUB_TO_USD, 2)
-        elif asset.upper() == "RUB":
-            pay_amount = round(price_rub, 2)
-        else:
-            pay_amount = round(price_rub / EXAMPLE_RUB_TO_USD, 6)
+        pay_amount = convert_price_rub_to_asset(price_rub, asset.upper())
+
         order_uid = f"{order_chat}_{order_id}"
         description = f"Заказ #{order_id} {row['category']}"
         callback_url = (WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn") if WEB_DOMAIN else None
