@@ -32,7 +32,7 @@ SUPPORT_USERNAMES = os.environ.get("SUPPORT_USERNAMES") or "@Urikossan"
 # Список admin IDs (по умолчанию один). Можно добавить агентов в БД.
 DEFAULT_ADMIN_ID = int(os.environ.get("ADMIN_ID") or 1942740947)
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"  # например https://my-app.onrender.com
-USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == 1
+USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == "1"
 RUN_LOCAL_POLLING = os.environ.get("RUN_LOCAL_POLLING", "0") == "1"
 DB_FILE = os.environ.get("DB_FILE") or "sale_bot_full.db"
 IPN_LOG_FILE = os.environ.get("IPN_LOG_FILE") or "ipn_log.jsonl"
