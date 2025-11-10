@@ -24,13 +24,13 @@ import telebot
 from telebot import types
 
 # ----------------------- НАСТРОЙКИ -----------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_BOTFATHER_TOKEN_HERE"
-CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or ""  # вставь свой Cryptobot API token, если хочешь
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
+CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"  # вставь свой Cryptobot API token, если хочешь
 # Список юзернеймов внешней поддержки, разделённый запятой (показываются в меню)
 SUPPORT_USERNAMES = os.environ.get("SUPPORT_USERNAMES") or "@Urikossan"
 # Список admin IDs (по умолчанию один). Можно добавить агентов в БД.
 DEFAULT_ADMIN_ID = int(os.environ.get("ADMIN_ID") or 1942740947)
-WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or ""  # например https://my-app.onrender.com
+WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"  # например https://my-app.onrender.com
 USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == "1"
 RUN_LOCAL_POLLING = os.environ.get("RUN_LOCAL_POLLING", "0") == "1"
 DB_FILE = os.environ.get("DB_FILE") or "sale_bot_full.db"
