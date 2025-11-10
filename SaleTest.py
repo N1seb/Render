@@ -1,13 +1,10 @@
-# SaleTest.py
-# Полный развёрнутый Telegram-бот + CryptoBot + SQLite + многопользовательская поддержка
-# --------------------------------------------------------------------------
-# Вставь свои значения:
-#   BOT_TOKEN              - токен от @BotFather
-#   CRYPTOPAY_API_TOKEN    - токен от @CryptoBot (если есть)
-#   WEB_DOMAIN             - https://your-app.onrender.com (для webhook и IPN)
-# Затем: pip install -r requirements.txt (pyTelegramBotAPI Flask requests qrcode pillow)
-# Procfile (для Render/Railway): web: python3 SaleTest.py
-# --------------------------------------------------------------------------
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SaleTest.py
+Полный Telegram-бот с магазином, CryptoBot-интеграцией, IPN, и полноценной поддержкой с операторами (SQLite).
+Сохраняет всё в SQLite, операторы и обращения не теряются при перезапуске.
+"""
 
 import os
 import json
@@ -17,59 +14,68 @@ import qrcode
 import io
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 import telebot
 from telebot import types
 
-# ----------------------- НАСТРОЙКИ -----------------------
-BOT_TOKEN = "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
-
-CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"  # вставь свой Cryptobot API token, если хочешь
-# Список юзернеймов внешней поддержки, разделённый запятой (показываются в меню)
-SUPPORT_USERNAMES = os.environ.get("SUPPORT_USERNAMES") or "@Urikossan"
-# Список admin IDs (по умолчанию один). Можно добавить агентов в БД.
-DEFAULT_ADMIN_ID = int(os.environ.get("ADMIN_ID") or 1942740947)
-WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"  # например https://my-app.onrender.com
+# -------------------------
+# НАСТРОЙКИ (вставлены твои значения по умолчанию)
+# Можно переопределить через ENV переменные на Render
+# -------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
+CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"
+WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"
 USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == "1"
-RUN_LOCAL_POLLING = os.environ.get("RUN_LOCAL_POLLING", "0") == "1"
-DB_FILE = os.environ.get("DB_FILE") or "sale_bot_full.db"
-IPN_LOG_FILE = os.environ.get("IPN_LOG_FILE") or "ipn_log.jsonl"
+
+# Админ (у тебя)
+ADMIN_IDS = set([int(os.environ.get("ADMIN_ID") or 1942740947)])
+# Операторы инициализируются в БД; можно добавить первоначального оператора здесь:
+INITIAL_OPERATORS = [7771789412]  # как ты просил — только этот ID сейчас опер
+
+# CryptoBot base
 CRYPTO_API_BASE = "https://pay.crypt.bot/api"
-# Валюты
+
+# Валюты (для выбора)
 AVAILABLE_ASSETS = [
-    ("RUB", "Рубль (RUB)"),
-    ("USD", "Доллар (USD)"),
-    ("EUR", "Евро (EUR)"),
-    ("USDT", "USDT (Tether)"),
+    ("RUB", "Рубль"),
+    ("USD", "Доллар"),
+    ("USDT", "USDT"),
     ("TON", "TON"),
     ("TRX", "TRX"),
-    ("MATIC", "MATIC"),
+    ("MATIC", "MATIC")
 ]
-# Офферы (цены в рублях)
+
+# Офферы
 OFFERS = {
     "sub": {"100": 100, "500": 400, "1000": 700},
     "view": {"1000": 50, "5000": 200, "10000": 350},
     "com": {"50": 150, "200": 500},
 }
 PRETTY = {"sub": "Подписчики", "view": "Просмотры", "com": "Комментарии"}
-# Примерный курс RUB->USD (демо), лучше подключить реальный курс при необходимости
-EXAMPLE_RUB_TO_USD = 100.0
-# -------------------------------------------------------------------
 
-app = Flask(__name__)
+DB_FILE = os.environ.get("DB_FILE") or "salebot.sqlite"
+IPN_LOG_FILE = "ipn_log.jsonl"
+
+# -------------------------
+# Инициализация бота и фласка
+# -------------------------
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+app = Flask(__name__)
 
-# ----------------------- SQLite init -----------------------
-def get_db_conn():
+# -------------------------
+# SQLite - инициализация
+# -------------------------
+def get_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
+    # users
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
@@ -79,6 +85,7 @@ def init_db():
         created_at TEXT
     )
     """)
+    # orders
     cur.execute("""
     CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +101,7 @@ def init_db():
         updated_at TEXT
     )
     """)
+    # invoices map
     cur.execute("""
     CREATE TABLE IF NOT EXISTS invoices_map (
         invoice_id TEXT PRIMARY KEY,
@@ -103,37 +111,43 @@ def init_db():
         created_at TEXT
     )
     """)
+    # operators
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS support_agents (
+    CREATE TABLE IF NOT EXISTS operators (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        admin_chat_id INTEGER UNIQUE,
+        chat_id INTEGER UNIQUE,
         username TEXT,
         display_name TEXT,
         created_at TEXT
     )
     """)
+    # support requests
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS support_conversations (
+    CREATE TABLE IF NOT EXISTS support_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_chat_id INTEGER,
-        title TEXT,
+        user_chat INTEGER,
+        username TEXT,
+        text TEXT,
         status TEXT,
-        created_at TEXT,
-        updated_at TEXT
+        created_at TEXT
     )
     """)
+    # support messages history (optional)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS support_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conv_id INTEGER,
-        from_chat_id INTEGER,
-        to_chat_id INTEGER,
-        direction TEXT,
-        message_type TEXT,
+        req_id INTEGER,
+        from_chat INTEGER,
+        to_chat INTEGER,
         text TEXT,
-        tg_message_id INTEGER,
-        file_id TEXT,
-        raw_payload TEXT,
+        created_at TEXT
+    )
+    """)
+    # notifications mapping (operator -> last notification message id to update)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS operator_notifications (
+        operator_chat INTEGER PRIMARY KEY,
+        message_id INTEGER,
         created_at TEXT
     )
     """)
@@ -142,24 +156,58 @@ def init_db():
 
 init_db()
 
-# ----------------------- DB helpers -----------------------
-def ensure_user(chat_id: int, message: Optional[telebot.types.Message]=None):
-    conn = get_db_conn()
+# -------------------------
+# DB helper functions
+# -------------------------
+def ensure_user(chat_id: int, message: Optional[telebot.types.Message] = None):
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT chat_id FROM users WHERE chat_id = ?", (chat_id,))
-    r = cur.fetchone()
-    if not r and message is not None:
-        cur.execute("INSERT OR IGNORE INTO users (chat_id, username, first_name, last_name, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (chat_id, getattr(message.from_user, "username", None),
+    if not cur.fetchone() and message is not None:
+        cur.execute("INSERT INTO users (chat_id, username, first_name, last_name, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (chat_id,
+                     getattr(message.from_user, "username", None),
                      getattr(message.from_user, "first_name", None),
                      getattr(message.from_user, "last_name", None),
                      datetime.utcnow().isoformat()))
         conn.commit()
     conn.close()
 
+def add_operator(chat_id:int, username:Optional[str]=None, display_name:Optional[str]=None):
+    conn = get_db()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute("INSERT OR IGNORE INTO operators (chat_id, username, display_name, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, username, display_name, now))
+    conn.commit()
+    conn.close()
+    # ensure notification row exists
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO operator_notifications (operator_chat, message_id, created_at) VALUES (?, ?, ?)",
+                (chat_id, None, now))
+    conn.commit()
+    conn.close()
+
+def remove_operator(chat_id:int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM operators WHERE chat_id = ?", (chat_id,))
+    cur.execute("DELETE FROM operator_notifications WHERE operator_chat = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def list_operators():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM operators ORDER BY id")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
 def create_order_record(chat_id:int, category:str, amount:int, price:float, currency:str) -> int:
     now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("""INSERT INTO orders (chat_id, category, amount, price, currency, status, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -171,115 +219,77 @@ def create_order_record(chat_id:int, category:str, amount:int, price:float, curr
 
 def update_order_invoice(order_id:int, invoice_id:Optional[str], pay_url:Optional[str]):
     now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE orders SET invoice_id = ?, pay_url = ?, updated_at = ? WHERE id = ?", (invoice_id, pay_url, now, order_id))
     conn.commit()
     conn.close()
 
-def update_order_status_db(order_id:int, new_status:str):
-    now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?", (new_status, now, order_id))
-    conn.commit()
-    conn.close()
-
 def set_invoice_mapping(invoice_id:str, chat_id:int, order_id:int, raw_payload:Optional[str]=None):
     now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO invoices_map (invoice_id, chat_id, order_id, raw_payload, created_at) VALUES (?, ?, ?, ?, ?)",
-                (invoice_id, chat_id, order_id, raw_payload, now))
+                (invoice_id, chat_id, order_id, json.dumps(raw_payload, ensure_ascii=False) if raw_payload else None, now))
     conn.commit()
     conn.close()
 
-def get_invoice_map(invoice_id:str):
-    conn = get_db_conn()
+def get_open_requests_count() -> int:
+    conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM invoices_map WHERE invoice_id = ?", (invoice_id,))
+    cur.execute("SELECT COUNT(*) as c FROM support_requests WHERE status = 'open'")
     r = cur.fetchone()
     conn.close()
-    return dict(r) if r else None
+    return r["c"] if r else 0
 
-def get_order_by_id(order_id:int):
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-    r = cur.fetchone()
-    conn.close()
-    return dict(r) if r else None
-
-def get_user_orders(chat_id:int):
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE chat_id = ? ORDER BY id DESC", (chat_id,))
-    rows = [dict(x) for x in cur.fetchall()]
-    conn.close()
-    return rows
-
-# Support helpers
-def add_support_agent(admin_chat_id:int, username:Optional[str]=None, display_name:Optional[str]=None):
+def create_support_request(user_chat:int, username:str, text:str) -> int:
     now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
+    conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO support_agents (admin_chat_id, username, display_name, created_at) VALUES (?, ?, ?, ?)",
-                (admin_chat_id, username, display_name, now))
+    cur.execute("INSERT INTO support_requests (user_chat, username, text, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_chat, username, text, "open", now))
+    rid = cur.lastrowid
+    cur.execute("INSERT INTO support_messages (req_id, from_chat, to_chat, text, created_at) VALUES (?, ?, ?, ?, ?)",
+                (rid, user_chat, None, text, now))
     conn.commit()
     conn.close()
+    return rid
 
-def remove_support_agent(admin_chat_id:int):
-    conn = get_db_conn()
+def get_open_requests(offset:int=0, limit:int=10):
+    conn = get_db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM support_agents WHERE admin_chat_id = ?", (admin_chat_id,))
-    conn.commit()
-    conn.close()
-
-def list_support_agents():
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM support_agents")
+    cur.execute("SELECT * FROM support_requests WHERE status = 'open' ORDER BY id ASC LIMIT ? OFFSET ?", (limit, offset))
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
 
-def create_support_conversation(user_chat_id:int, title:str="Запрос в поддержку"):
-    now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
+def get_request_by_id(req_id:int):
+    conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT INTO support_conversations (user_chat_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (user_chat_id, title, "open", now, now))
-    conv_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return conv_id
-
-def add_support_message(conv_id:int, from_chat:int, to_chat:int, direction:str, message_type:str, text:Optional[str]=None, tg_message_id:Optional[int]=None, file_id:Optional[str]=None, raw_payload:Optional[str]=None):
-    now = datetime.utcnow().isoformat()
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("""INSERT INTO support_messages (conv_id, from_chat_id, to_chat_id, direction, message_type, text, tg_message_id, file_id, raw_payload, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (conv_id, from_chat, to_chat, direction, message_type, text, tg_message_id, file_id, raw_payload, now))
-    mid = cur.lastrowid
-    cur.execute("UPDATE support_conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
-    conn.commit()
-    conn.close()
-    return mid
-
-def get_or_create_open_conv_for_user(user_chat_id:int):
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM support_conversations WHERE user_chat_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", (user_chat_id,))
+    cur.execute("SELECT * FROM support_requests WHERE id = ?", (req_id,))
     r = cur.fetchone()
-    if r:
-        conv_id = r["id"]
-    else:
-        conv_id = create_support_conversation(user_chat_id)
     conn.close()
-    return conv_id
+    return dict(r) if r else None
 
-# ----------------------- CryptoBot helpers -----------------------
+def close_request(req_id:int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE support_requests SET status = 'closed' WHERE id = ?", (req_id,))
+    conn.commit()
+    conn.close()
+
+def add_support_message(req_id:int, from_chat:int, to_chat:int, text:str):
+    now = datetime.utcnow().isoformat()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO support_messages (req_id, from_chat, to_chat, text, created_at) VALUES (?, ?, ?, ?, ?)",
+                (req_id, from_chat, to_chat, text, now))
+    conn.commit()
+    conn.close()
+
+# -------------------------
+# CryptoBot helpers
+# -------------------------
 def create_cryptobot_invoice(amount_value:float, asset:str, payload:str, description:str, callback_url:Optional[str]=None):
     url = CRYPTO_API_BASE + "/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTOPAY_API_TOKEN, "Content-Type": "application/json"}
@@ -312,7 +322,9 @@ def get_invoice_info(invoice_id:str):
     except Exception as e:
         return {"error": True, "exception": str(e)}
 
-# ----------------------- QR helper -----------------------
+# -------------------------
+# QR helper
+# -------------------------
 def generate_qr_bytes(url:str) -> bytes:
     img = qrcode.make(url)
     buf = io.BytesIO()
@@ -320,114 +332,119 @@ def generate_qr_bytes(url:str) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ----------------------- UI helpers -----------------------
-def main_menu_keyboard():
+# -------------------------
+# UI helpers
+# -------------------------
+def main_menu_markup():
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("📈 Купить подписчиков", callback_data="menu_sub"))
     kb.add(types.InlineKeyboardButton("👁 Купить просмотры", callback_data="menu_view"))
     kb.add(types.InlineKeyboardButton("💬 Купить комментарии", callback_data="menu_com"))
+    # support buttons: external personal messages and in-bot
+    kb.add(types.InlineKeyboardButton("В личных сообщениях", callback_data="support_personal"))
+    kb.add(types.InlineKeyboardButton("Написать в поддержку (в боте)", callback_data="support_bot"))
     kb.add(types.InlineKeyboardButton("👤 Профиль", callback_data="profile"))
-    # External support usernames (first displayed)
-    if SUPPORT_USERNAMES:
-        # show first username as clickable link button
-        first = SUPPORT_USERNAMES.split(",")[0].strip()
-        kb.add(types.InlineKeyboardButton(f"📨 Написать {first}", url=f"https://t.me/{first.lstrip('@')}"))
-    # internal support via bot
-    kb.add(types.InlineKeyboardButton("📞 Связаться с поддержкой (в боте)", callback_data="contact_support"))
-    # admin shortcut (for owners)
-    kb.add(types.InlineKeyboardButton("🔐 Админ", callback_data="admin_panel"))
     return kb
 
 def packages_markup(cat_key):
     kb = types.InlineKeyboardMarkup(row_width=1)
     for amt, price in OFFERS.get(cat_key, {}).items():
         kb.add(types.InlineKeyboardButton(f"{amt} — {price}₽", callback_data=f"order_{cat_key}_{amt}"))
-    kb.add(types.InlineKeyboardButton("✏ Своя сумма", callback_data=f"custom_{cat_key}"))
+    kb.add(types.InlineKeyboardButton("🔢 Своя сумма", callback_data=f"custom_{cat_key}"))
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back"))
     return kb
 
 def currency_selection_markup(order_ref:str):
     kb = types.InlineKeyboardMarkup(row_width=3)
-    for code, desc in AVAILABLE_ASSETS:
+    for code, _ in AVAILABLE_ASSETS:
         kb.add(types.InlineKeyboardButton(f"{code}", callback_data=f"pay_asset_{order_ref}_{code}"))
     kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_payment"))
     return kb
 
-# ----------------------- Bot handlers -----------------------
-@bot.message_handler(commands=["start"])
+# -------------------------
+# In-memory states (short-lived)
+# -------------------------
+user_state: Dict[int, Dict[str, Any]] = {}   # for custom amount, support message etc.
+operator_state: Dict[int, Dict[str, Any]] = {}  # for when operator is replying to a specific req
+
+# -------------------------
+# Bot handlers
+# -------------------------
+@bot.message_handler(commands=['start'])
 def cmd_start(m):
     ensure_user(m.chat.id, m)
-    bot.send_message(m.chat.id, "🧸 Добро пожаловать! Выберите услугу:", reply_markup=main_menu_keyboard())
+    bot.send_message(m.chat.id, "🧸 Добро пожаловать в магазин!", reply_markup=main_menu_markup())
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
+def cb_all(call):
+    data = call.data
     cid = call.message.chat.id
-    data_call = call.data
+    # Menu navigation
+    if data == "menu_sub" or data == "menu_view" or data == "menu_com":
+        if data == "menu_sub":
+            bot.edit_message_text("📈 Пакеты подписчиков:", cid, call.message.message_id, reply_markup=packages_markup("sub"))
+        elif data == "menu_view":
+            bot.edit_message_text("👁 Пакеты просмотров:", cid, call.message.message_id, reply_markup=packages_markup("view"))
+        else:
+            bot.edit_message_text("💬 Пакеты комментариев:", cid, call.message.message_id, reply_markup=packages_markup("com"))
+        return
 
-    if data_call == "menu_sub":
-        bot.edit_message_text("📈 Выберите пакет подписчиков:", cid, call.message.message_id, reply_markup=packages_markup("sub"))
+    if data == "back":
+        bot.edit_message_text("🧸 Главное меню:", cid, call.message.message_id, reply_markup=main_menu_markup())
         return
-    if data_call == "menu_view":
-        bot.edit_message_text("👁 Выберите пакет просмотров:", cid, call.message.message_id, reply_markup=packages_markup("view"))
+
+    # support personal
+    if data == "support_personal":
+        # show simple instructions (no username)
+        bot.edit_message_text("📨 Чтобы написать оператору в личные сообщения — найдите его в Telegram по его юзернейму.\n\nЕсли хотите написать через бота, нажмите «Написать в поддержку (в боте)».", cid, call.message.message_id, reply_markup=None)
         return
-    if data_call == "menu_com":
-        bot.edit_message_text("💬 Выберите пакет комментариев:", cid, call.message.message_id, reply_markup=packages_markup("com"))
+
+    # support via bot
+    if data == "support_bot":
+        conv_id = None
+        # request the message from user
+        user_state[cid] = {"awaiting_support_msg": True}
+        bot.send_message(cid, "✉️ Напишите своё сообщение для поддержки. Оно будет отправлено операторам.")
         return
-    if data_call == "back":
-        bot.edit_message_text("🧸 Главное меню:", cid, call.message.message_id, reply_markup=main_menu_keyboard())
-        return
-    if data_call == "profile":
-        show_profile(cid)
-        return
-    if data_call == "contact_support":
-        # start support conversation and forward to agents
-        conv_id = get_or_create_open_conv_for_user(cid)
-        bot.send_message(cid, "✉️ Напишите ваше сообщение для поддержки. Мы пересылаем его агентам поддержки.")
-        # set user state
-        user_state[cid] = {"awaiting_support_msg": True, "conv_id": conv_id}
-        bot.answer_callback_query(call.id)
-        return
-    if data_call.startswith("order_"):
+
+    # ordering fixed packages
+    if data.startswith("order_"):
         try:
-            _, category, amt = data_call.split("_", 2)
+            _, category, amt = data.split("_", 2)
             amount = int(amt)
-        except Exception:
-            bot.answer_callback_query(call.id, "Ошибка в данных заказа.")
+        except:
+            bot.answer_callback_query(call.id, "Неверный формат заказа")
             return
-        price_rub = OFFERS.get(category, {}).get(amt, amount)
-        order_id = create_order_record(cid, category, amount, price_rub, "RUB")
-        order_ref = f"{cid}_{order_id}"
-        bot.send_message(cid, f"Заказ #{order_id} создан. Выберите валюту для оплаты:", reply_markup=currency_selection_markup(order_ref))
-        bot.answer_callback_query(call.id, "Заказ создан.")
+        # ask for link next
+        user_state[cid] = {"awaiting_link_for_order": True, "order_category": category, "order_amount": amount}
+        bot.send_message(cid, f"Вы выбрали {PRETTY.get(category)} — {amount}. Отправьте ссылку на канал/пост (начинается с http...):")
+        bot.answer_callback_query(call.id, "Введите ссылку для заказа")
         return
-    if data_call.startswith("custom_"):
-        category = data_call.replace("custom_", "")
-        max_offer = max((int(x) for x in OFFERS.get(category, {}).keys())) if OFFERS.get(category) else 0
+
+    # custom amount
+    if data.startswith("custom_"):
+        category = data.replace("custom_", "")
+        max_offer = 0
+        if OFFERS.get(category):
+            max_offer = max(int(x) for x in OFFERS[category].keys())
         min_allowed = max_offer + 1 if max_offer else 1
         user_state[cid] = {"awaiting_custom_amount": True, "category": category, "min_allowed": min_allowed}
         bot.send_message(cid, f"Введите количество для {PRETTY.get(category)} (минимум {min_allowed}):")
         bot.answer_callback_query(call.id)
         return
-    if data_call == "cancel_payment":
-        bot.send_message(cid, "Оплата отменена.", reply_markup=main_menu_keyboard())
-        bot.answer_callback_query(call.id)
-        return
-    if data_call.startswith("pay_asset_"):
-        # format: pay_asset_{chat}_{orderid}_{ASSET}
-        parts = data_call.split("_", 3)
-        if len(parts) == 4:
-            _, order_ref, asset = parts[0], parts[1], parts[3]
-        else:
-            # older format: pay_asset_{orderref}_{asset}
-            try:
-                _, _, order_ref, asset = parts
-            except:
-                bot.answer_callback_query(call.id, "Bad pay data")
-                return
-        # order_ref is like "chatid_orderid" or "chatid_orderid"
+
+    # currency pay button: format pay_asset_{chat_order}_{ASSET}
+    if data.startswith("pay_asset_"):
+        # parse
+        try:
+            _, order_ref, asset = data.split("_", 2)
+        except:
+            bot.answer_callback_query(call.id, "Неверные данные оплаты")
+            return
+        # order_ref is like "chatid-orderid" or "chatid_orderid" — we will use chatid_orderid created below
         if "_" in order_ref:
+            chat_str, orderid_str = order_ref.split("_", 1)
             try:
-                chat_str, orderid_str = order_ref.split("_", 1)
                 order_chat = int(chat_str); order_id = int(orderid_str)
             except:
                 bot.answer_callback_query(call.id, "Неверный идентификатор заказа")
@@ -435,12 +452,18 @@ def callback_handler(call):
         else:
             bot.answer_callback_query(call.id, "Неверный формат заказа")
             return
-        order = get_order_by_id(order_id)
-        if not order:
+        # fetch order
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
             bot.answer_callback_query(call.id, "Заказ не найден")
             return
-        price_rub = float(order["price"])
-        # convert to asset amount (demo logic)
+        price_rub = float(row["price"])
+        # quick conversion demo (RUB->USD) - you can replace with real rates if needed
+        EXAMPLE_RUB_TO_USD = 100.0
         if asset.upper() == "USD":
             pay_amount = round(price_rub / EXAMPLE_RUB_TO_USD, 2)
         elif asset.upper() == "RUB":
@@ -448,314 +471,396 @@ def callback_handler(call):
         else:
             pay_amount = round(price_rub / EXAMPLE_RUB_TO_USD, 6)
         order_uid = f"{order_chat}_{order_id}"
-        description = f"Заказ #{order_id} {order['category']} {order['amount']}"
+        description = f"Заказ #{order_id} {row['category']}"
         callback_url = (WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn") if WEB_DOMAIN else None
         resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
         if isinstance(resp, dict) and resp.get("error"):
             bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
-            bot.answer_callback_query(call.id, "Ошибка при создании чека")
+            bot.answer_callback_query(call.id, "Ошибка")
             return
-        # extract invoice id and pay url (handle response variants)
-        invoice_id = None
-        pay_url = None
-        if isinstance(resp, dict):
-            invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or (resp.get("result") and resp["result"].get("invoice_id")) or None
-            pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result") and resp["result"].get("pay_url")) or resp.get("url") or resp.get("invoice_url")
+        # get invoice id and url
+        invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or resp.get("id") or None
+        pay_url = resp.get("pay_url") or resp.get("payment_url") or resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None
         if invoice_id:
-            set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=json.dumps(resp, ensure_ascii=False))
+            set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
         update_order_invoice(order_id, invoice_id, pay_url)
         if pay_url:
-            bot.send_message(order_chat, f"Перейдите по ссылке для оплаты:\n{pay_url}")
+            bot.send_message(order_chat, f"Перейдите для оплаты: {pay_url}")
             try:
                 qr = generate_qr_bytes(pay_url)
                 bot.send_photo(order_chat, qr)
-            except Exception:
+            except:
                 pass
             bot.answer_callback_query(call.id, "Ссылка отправлена")
             return
         else:
-            bot.send_message(order_chat, "Ссылка на оплату не получена. Обратитесь к администратору.")
-            bot.answer_callback_query(call.id, "Ссылка не получена")
+            bot.send_message(order_chat, "Не удалось получить ссылку на оплату. Обратитесь к администратору.")
+            bot.answer_callback_query(call.id, "Ошибка получения ссылки")
             return
-    if data_call.startswith("cancel_"):
-        try:
-            _, oid = data_call.split("_", 1)
-            oid = int(oid)
-        except:
-            bot.answer_callback_query(call.id, "Bad cancel")
-            return
-        order = get_order_by_id(oid)
-        if not order:
-            bot.answer_callback_query(call.id, "Заказ не найден")
-            return
-        if order["status"] == "оплачен":
-            bot.answer_callback_query(call.id, "Нельзя отменить оплаченный заказ")
-            return
-        update_order_status_db(oid, "Отменён")
-        bot.edit_message_text("Заказ отменён ✅", call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id, "Заказ отменён")
-        # notify admins (agents)
-        for agent in list_support_agents():
-            try:
-                bot.send_message(agent["admin_chat_id"], f"Пользователь {cid} отменил заказ #{oid}")
-            except:
-                pass
-        return
-    if data_call.startswith("admin_manage_"):
-        if cid != DEFAULT_ADMIN_ID:
-            bot.answer_callback_query(call.id, "Нет прав")
-            return
-        _, _, user_id, order_id = data_call.split("_")
-        uid = int(user_id); oid = int(order_id)
-        # show options
-        kb = types.InlineKeyboardMarkup(row_width=1)
-        kb.add(types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_set_{uid}_{oid}_Подтверждено"))
-        kb.add(types.InlineKeyboardButton("🕒 В процессе", callback_data=f"admin_set_{uid}_{oid}_В процессе"))
-        kb.add(types.InlineKeyboardButton("❌ Отменить", callback_data=f"admin_set_{uid}_{oid}_Отменён"))
-        bot.send_message(cid, f"Управление заказом {uid}#{oid}", reply_markup=kb)
+
+    if data == "cancel_payment":
+        bot.send_message(cid, "Оплата отменена.", reply_markup=main_menu_markup())
         bot.answer_callback_query(call.id)
         return
-    if data_call.startswith("admin_set_"):
-        if cid != DEFAULT_ADMIN_ID:
-            bot.answer_callback_query(call.id, "Нет прав")
+
+    # profile show
+    if data == "profile":
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE chat_id = ? ORDER BY id DESC", (cid,))
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            bot.send_message(cid, "У вас нет заказов.", reply_markup=main_menu_markup())
             return
-        try:
-            _, _, user_id, order_id_str, new_status = data_call.split("_", 4)
-            uid = int(user_id); oid = int(order_id_str)
-        except:
-            bot.answer_callback_query(call.id, "Bad admin set")
-            return
-        update_order_status_db(oid, new_status)
-        try:
-            bot.send_message(uid, f"🔔 Статус вашего заказа #{oid} обновлён: {new_status}")
-        except:
-            pass
-        bot.answer_callback_query(call.id, "Статус изменён")
+        txt = "📋 Ваши заказы:\n\n"
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for r in rows:
+            txt += f"#{r['id']} | {PRETTY.get(r['category'], r['category'])} {r['amount']} — {r['price']}{r['currency']} — {r['status']}\n"
+            if r['status'] not in ("оплачен", "Отменён", "closed"):
+                kb.add(types.InlineKeyboardButton(f"Отменить #{r['id']}", callback_data=f"cancel_{r['id']}"))
+        bot.send_message(cid, txt, reply_markup=kb)
         return
-    # support agent reply action: admin clicks "reply_to_conv_{conv_id}_{user_chat}"
-    if data_call.startswith("reply_to_conv_"):
-        parts = data_call.split("_", 3)
-        if len(parts) < 3:
-            bot.answer_callback_query(call.id, "Bad reply")
-            return
-        _, _, conv_id_s = parts[0], parts[1], parts[2]
+
+    if data.startswith("cancel_"):
         try:
-            conv_id = int(conv_id_s)
+            _, oid = data.split("_",1)
+            oid = int(oid)
+        except:
+            bot.answer_callback_query(call.id, "Ошибка отмены")
+            return
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE id = ?", (oid,))
+        r = cur.fetchone()
+        if not r:
+            bot.answer_callback_query(call.id, "Заказ не найден")
+            conn.close()
+            return
+        if r["status"] == "оплачен":
+            bot.answer_callback_query(call.id, "Нельзя отменить оплаченный заказ")
+            conn.close()
+            return
+        cur.execute("UPDATE orders SET status = ? WHERE id = ?", ("Отменён", oid))
+        conn.commit(); conn.close()
+        bot.answer_callback_query(call.id, "Заказ отменён")
+        bot.send_message(cid, f"Заказ #{oid} отменён.")
+        return
+
+    # --- Support operators actions: notification button pressed ---
+    # open requests menu: callback open_requests_page_{page}
+    if data.startswith("open_requests_page_"):
+        try:
+            page = int(data.split("_")[-1])
+        except:
+            page = 1
+        show_requests_page(call.message.chat.id, page, call.message)
+        bot.answer_callback_query(call.id)
+        return
+
+    # operator clicked a specific request: req_{id}
+    if data.startswith("req_"):
+        try:
+            req_id = int(data.split("_")[1])
+        except:
+            bot.answer_callback_query(call.id, "Bad request id")
+            return
+        req = get_request_by_id(req_id)
+        if not req or req["status"] != "open":
+            bot.answer_callback_query(call.id, "Обращение не найдено или уже закрыто")
+            return
+        # show full text and reply button
+        text = f"📨 Обращение #{req['id']}\nОт: {req['username']} (id {req['user_chat']})\n\n{req['text']}\n\n[Нажмите Ответить, чтобы отправить ответ и закрыть обращение]"
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("Ответить", callback_data=f"reply_req_{req_id}"))
+        kb.add(types.InlineKeyboardButton("Назад к списку", callback_data="open_requests_page_1"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+        bot.answer_callback_query(call.id)
+        return
+
+    if data.startswith("reply_req_"):
+        try:
+            req_id = int(data.split("_")[2])
         except:
             bot.answer_callback_query(call.id, "Bad conv id")
             return
-        # set agent state: awaiting reply for conv
-        agent_state[cid] = {"awaiting_reply_conv": conv_id}
-        bot.send_message(cid, "Введите ответ, я отправлю его пользователю (можно прикрепить файлы).")
+        # set operator state awaiting reply to this request
+        operator_state[call.from_user.id] = {"awaiting_reply_for": req_id, "message_id": call.message.message_id}
+        bot.send_message(call.from_user.id, "Введите ответ для пользователя (сообщение будет отправлено и обращение закроется):")
         bot.answer_callback_query(call.id)
         return
 
     bot.answer_callback_query(call.id, "Неизвестная команда.")
 
-# In-memory states for users and agents (temporary)
-user_state: Dict[int, Dict[str, Any]] = {}
-agent_state: Dict[int, Dict[str, Any]] = {}
+# -------------------------
+# Support: utilities for operator notifications & pagination
+# -------------------------
+def notify_all_operators_new_request():
+    # For each operator, either send new notification message or update existing one
+    ops = list_operators()
+    total = get_open_requests_count()
+    if total == 0:
+        return
+    for op in ops:
+        op_chat = op["chat_id"]
+        # try to get existing notification message id
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT message_id FROM operator_notifications WHERE operator_chat = ?", (op_chat,))
+        r = cur.fetchone()
+        conn.close()
+        notif_text = f"🔔 У вас новое обращение ({total} всего)"
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Перейти к обращениям", callback_data=f"open_requests_page_1"))
+        try:
+            if r and r["message_id"]:
+                # edit existing
+                bot.edit_message_text(notif_text, op_chat, r["message_id"], reply_markup=kb)
+            else:
+                sent = bot.send_message(op_chat, notif_text, reply_markup=kb)
+                # store message id
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("INSERT OR REPLACE INTO operator_notifications (operator_chat, message_id, created_at) VALUES (?, ?, ?)",
+                            (op_chat, sent.message_id, datetime.utcnow().isoformat()))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            # operator might not have started bot or blocked -> ignore
+            # ensure stored message_id removed so future sends try again
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("INSERT OR REPLACE INTO operator_notifications (operator_chat, message_id, created_at) VALUES (?, ?, ?)",
+                            (op_chat, None, datetime.utcnow().isoformat()))
+                conn.commit()
+                conn.close()
+            except:
+                pass
 
-@bot.message_handler(content_types=['text', 'photo', 'document', 'audio', 'voice', 'video'])
-def inbound_message(m):
+def show_requests_page(operator_chat:int, page:int, message_reference=None):
+    per_page = 3
+    offset = (page-1) * per_page
+    rows = get_open_requests(offset=offset, limit=per_page)
+    total = get_open_requests_count()
+    total_pages = (total + per_page - 1) // per_page if total else 1
+    # build keyboard with requests
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for r in rows:
+        uname = r["username"] or f"id{r['user_chat']}"
+        kb.add(types.InlineKeyboardButton(f"{r['id']} | {uname}", callback_data=f"req_{r['id']}"))
+    # navigation
+    nav = types.InlineKeyboardMarkup(row_width=3)
+    items = []
+    prev_page = page-1 if page>1 else 1
+    next_page = page+1 if page<total_pages else total_pages
+    kb_nav = types.InlineKeyboardMarkup(row_width=3)
+    kb_nav.add(types.InlineKeyboardButton("◀️", callback_data=f"open_requests_page_{prev_page}"),
+               types.InlineKeyboardButton(f"{page}/{total_pages}", callback_data=f"noop_page"),
+               types.InlineKeyboardButton("▶️", callback_data=f"open_requests_page_{next_page}"))
+    # send or edit
+    txt = f"📂 Обращения — страница {page}/{total_pages}\nВсего открытых: {total}\n\nНажмите на обращение, чтобы открыть его."
+    try:
+        if message_reference:
+            bot.edit_message_text(txt, operator_chat, message_reference.message_id, reply_markup=kb)
+            # send navigation separately
+            bot.send_message(operator_chat, "Навигация:", reply_markup=kb_nav)
+        else:
+            bot.send_message(operator_chat, txt, reply_markup=kb)
+            bot.send_message(operator_chat, "Навигация:", reply_markup=kb_nav)
+    except Exception as e:
+        # if edit fails, send new
+        try:
+            bot.send_message(operator_chat, txt, reply_markup=kb)
+            bot.send_message(operator_chat, "Навигация:", reply_markup=kb_nav)
+        except:
+            pass
+
+# -------------------------
+# Message handlers: text (orders, support, operator replies)
+# -------------------------
+@bot.message_handler(content_types=['text'])
+def handle_text(m):
     cid = m.chat.id
-    text = getattr(m, "text", None)
-    # if user is sending custom amount
-    ustate = user_state.get(cid)
-    if ustate and ustate.get("awaiting_custom_amount"):
-        category = ustate["category"]
-        min_allowed = ustate["min_allowed"]
-        if not text or not text.isdigit():
-            bot.send_message(cid, "Введите целое число.")
+    text = m.text.strip()
+
+    # Admin commands: add/remove/check operators (only admin)
+    if text.startswith("/add_operator"):
+        if m.from_user.id not in ADMIN_IDS:
+            bot.reply_to(m, "Нет прав.")
+            return
+        parts = text.split()
+        if len(parts) != 2:
+            bot.reply_to(m, "Использование: /add_operator <chat_id>")
+            return
+        try:
+            new_id = int(parts[1])
+        except:
+            bot.reply_to(m, "Bad id")
+            return
+        add_operator(new_id, username=None, display_name=None)
+        bot.reply_to(m, f"Добавлен оператор {new_id}")
+        return
+
+    if text.startswith("/operator_remove"):
+        if m.from_user.id not in ADMIN_IDS:
+            bot.reply_to(m, "Нет прав.")
+            return
+        parts = text.split()
+        if len(parts) != 2:
+            bot.reply_to(m, "Использование: /operator_remove <chat_id>")
+            return
+        try:
+            rem = int(parts[1])
+        except:
+            bot.reply_to(m, "Bad id")
+            return
+        remove_operator(rem)
+        bot.reply_to(m, f"Удалён оператор {rem}")
+        return
+
+    if text.startswith("/operators_check"):
+        if m.from_user.id not in ADMIN_IDS:
+            bot.reply_to(m, "Нет прав.")
+            return
+        ops = list_operators()
+        if not ops:
+            bot.reply_to(m, "Нет операторов.")
+            return
+        s = "Операторы:\n"
+        for o in ops:
+            s += f"- id: {o['chat_id']}, username: {o['username'] or '—'}, name: {o['display_name'] or '—'}\n"
+        bot.reply_to(m, s)
+        return
+
+    # admin panel /sadm (only admin)
+    if text.startswith("/sadm"):
+        if m.from_user.id not in ADMIN_IDS:
+            bot.reply_to(m, "Нет прав.")
+            return
+        # show last 10 orders
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, chat_id, category, amount, price, currency, status FROM orders ORDER BY id DESC LIMIT 10")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            bot.reply_to(m, "Заказов нет.")
+            return
+        txt = "Последние 10 заказов:\n\n"
+        for r in rows:
+            txt += f"#{r['id']} uid:{r['chat_id']} {PRETTY.get(r['category'],r['category'])} {r['amount']} — {r['price']}{r['currency']} — {r['status']}\n"
+        bot.reply_to(m, txt)
+        return
+
+    # If user awaiting custom amount
+    state = user_state.get(cid)
+    if state and state.get("awaiting_custom_amount"):
+        if not text.isdigit():
+            bot.reply_to(m, "Введите целое число.")
             return
         amount = int(text)
-        if amount < min_allowed:
-            bot.send_message(cid, f"Минимум {min_allowed}. Попробуйте ещё раз.")
+        if amount < state.get("min_allowed",1):
+            bot.reply_to(m, f"Минимум {state.get('min_allowed')}")
             return
-        price_rub = round(amount * 1.0, 2)
-        order_id = create_order_record(cid, category, amount, price_rub, "RUB")
+        # create order record price=amount * 1 (demo)
+        price = float(amount)  # simple mapping, replace with your pricing logic
+        order_id = create_order_record(cid, state["category"], amount, price, "RUB")
         user_state.pop(cid, None)
-        order_ref = f"{cid}_{order_id}"
-        bot.send_message(cid, f"Заказ #{order_id} создан. Выберите валюту для оплаты:", reply_markup=currency_selection_markup(order_ref))
-        return
-    # if user is sending support message
-    ustate = user_state.get(cid)
-    if ustate and ustate.get("awaiting_support_msg"):
-        conv_id = ustate["conv_id"]
-        # create support message and forward to all agents
-        # detect file types
-        file_id = None
-        msg_type = "text"
-        raw = None
-        if m.content_type == "text":
-            msg_text = m.text
-        else:
-            msg_text = f"<{m.content_type}>"
-            msg_type = m.content_type
-            # try get file id for photo/document/audio/voice
-            if m.content_type == "photo":
-                file_id = m.photo[-1].file_id
-            elif m.content_type == "document":
-                file_id = m.document.file_id
-            elif m.content_type == "voice":
-                file_id = m.voice.file_id
-            elif m.content_type == "audio":
-                file_id = m.audio.file_id
-            elif m.content_type == "video":
-                file_id = m.video.file_id
-        add_support_message(conv_id, cid, None, "user->agents", msg_type, text=msg_text, file_id=file_id, raw_payload=None)
-        user_state.pop(cid, None)
-        # forward to agents
-        agents = list_support_agents()
-        if not agents:
-            bot.send_message(cid, "Нет агентов поддержки. Попробуйте позже.")
-            return
-        for a in agents:
-            aid = int(a["admin_chat_id"])
-            try:
-                if file_id:
-                    # forward file
-                    if msg_type == "photo":
-                        bot.send_photo(aid, file_id, caption=f"Новый запрос от {cid} (conv {conv_id})\n{msg_text}")
-                    elif msg_type == "document":
-                        bot.send_document(aid, file_id, caption=f"Новый запрос от {cid} (conv {conv_id})\n{msg_text}")
-                    elif msg_type == "voice":
-                        bot.send_voice(aid, file_id, caption=f"Новый запрос от {cid} (conv {conv_id})")
-                    else:
-                        bot.send_message(aid, f"Новый запрос от {cid} (conv {conv_id})\n{msg_text}")
-                else:
-                    bot.send_message(aid, f"Новый запрос от {cid} (conv {conv_id})\n{msg_text}")
-                # add button for agent to reply
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton("Ответить", callback_data=f"reply_to_conv_{conv_id}"))
-                kb.add(types.InlineKeyboardButton("Перейти к беседе", callback_data=f"open_conv_{conv_id}"))
-                bot.send_message(aid, "Действия:", reply_markup=kb)
-            except Exception:
-                pass
-        bot.send_message(cid, "✅ Ваше сообщение отправлено агентам поддержки. Ожидайте ответа.")
-        return
-    # if agent is replying (agent_state)
-    astate = agent_state.get(cid)
-    if astate and astate.get("awaiting_reply_conv"):
-        conv_id = astate["awaiting_reply_conv"]
-        # get conv info
-        conn = get_db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM support_conversations WHERE id = ?", (conv_id,))
-        conv = cur.fetchone()
-        conn.close()
-        if not conv:
-            bot.send_message(cid, "Разговор не найден.")
-            agent_state.pop(cid, None)
-            return
-        user_chat = conv["user_chat_id"]
-        # forward agent message to user (support via bot)
-        file_id = None
-        msg_type = "text"
-        if m.content_type == "text":
-            reply_text = m.text
-            bot.send_message(user_chat, f"Ответ поддержки:\n{reply_text}")
-            add_support_message(conv_id, cid, user_chat, "agent->user", "text", text=reply_text)
-        else:
-            msg_type = m.content_type
-            if msg_type == "photo":
-                file_id = m.photo[-1].file_id
-                bot.send_photo(user_chat, file_id, caption="Ответ поддержки (фото)")
-            elif msg_type == "document":
-                file_id = m.document.file_id
-                bot.send_document(user_chat, file_id, caption="Ответ поддержки (файл)")
-            elif msg_type == "voice":
-                file_id = m.voice.file_id
-                bot.send_voice(user_chat, file_id, caption="Ответ поддержки (голос)")
-            elif msg_type == "audio":
-                file_id = m.audio.file_id
-                bot.send_audio(user_chat, file_id, caption="Ответ поддержки (аудио)")
-            add_support_message(conv_id, cid, user_chat, "agent->user", msg_type, file_id=file_id)
-        bot.send_message(cid, "Ответ отправлен пользователю.")
-        agent_state.pop(cid, None)
+        bot.reply_to(m, f"Заказ #{order_id} создан. Выберите валюту для оплаты.", reply_markup=currency_selection_markup(f"{cid}_{order_id}"))
         return
 
-    # general fallback
+    # If user awaiting link for order
+    if state and state.get("awaiting_link_for_order"):
+        link = text
+        if not (link.startswith("http://") or link.startswith("https://")):
+            bot.reply_to(m, "Неверная ссылка. Должна начинаться с http/https")
+            return
+        category = state["order_category"]
+        amount = state["order_amount"]
+        price = float(amount)  # demo
+        order_id = create_order_record(cid, category, amount, price, "RUB")
+        user_state.pop(cid, None)
+        bot.reply_to(m, f"Заказ #{order_id} создан. Выберите валюту для оплаты.", reply_markup=currency_selection_markup(f"{cid}_{order_id}"))
+        return
+
+    # If user awaiting support message
+    if state and state.get("awaiting_support_msg"):
+        user_state.pop(cid, None)
+        uname = m.from_user.username or f"id{cid}"
+        rid = create_support_request(cid, uname, text)
+        bot.reply_to(m, "✅ Ваше обращение отправлено. Ожидайте ответа.")
+        # notify operators
+        notify_all_operators_new_request()
+        return
+
+    # Operator replying to a request: operator_state holds awaiting_reply_for
+    opstate = operator_state.get(cid)
+    if opstate and opstate.get("awaiting_reply_for"):
+        req_id = opstate["awaiting_reply_for"]
+        # send message to user and close request
+        req = get_request_by_id(req_id)
+        if not req:
+            bot.reply_to(m, "Обращение не найдено.")
+            operator_state.pop(cid, None)
+            return
+        # send reply text to original user
+        reply_text = text
+        try:
+            bot.send_message(req["user_chat"], f"💬 Ответ от поддержки:\n{reply_text}")
+        except Exception as e:
+            pass
+        add_support_message(req_id, cid, req["user_chat"], reply_text)
+        close_request(req_id)
+        bot.reply_to(m, "Ответ отправлен и обращение закрыто.")
+        operator_state.pop(cid, None)
+        # update notifications for operators (counts)
+        notify_all_operators_new_request()
+        return
+
+    # fallback
     bot.send_message(cid, "Не понял. Нажми /start для меню.")
 
-# ----------------------- Profile and admin commands -----------------------
-def show_profile(chat_id:int):
-    ensure_user(chat_id)
-    orders = get_user_orders(chat_id)
-    if not orders:
-        bot.send_message(chat_id, "📭 У вас пока нет заказов.", reply_markup=main_menu_keyboard())
-        return
-    text = "📋 Ваши заказы:\n\n"
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for o in orders:
-        text += f"#{o['id']} | {PRETTY.get(o['category'],o['category'])} — {o['amount']} — {o['price']} {o['currency']} — {o['status']}\n"
-        if o['status'] not in ("Отменён", "оплачен"):
-            kb.add(types.InlineKeyboardButton(f"Отменить #{o['id']}", callback_data=f"cancel_{o['id']}"))
-    bot.send_message(chat_id, text, reply_markup=kb)
-
-def main_menu_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("📈 Купить подписчиков", callback_data="menu_sub"))
-    kb.add(types.InlineKeyboardButton("👁 Купить просмотры", callback_data="menu_view"))
-    kb.add(types.InlineKeyboardButton("💬 Купить комментарии", callback_data="menu_com"))
-    kb.add(types.InlineKeyboardButton("👤 Профиль", callback_data="profile"))
-    if SUPPORT_USERNAMES:
-        first = SUPPORT_USERNAMES.split(",")[0].strip()
-        kb.add(types.InlineKeyboardButton(f"📨 Написать {first}", url=f"https://t.me/{first.lstrip('@')}"))
-    kb.add(types.InlineKeyboardButton("📞 Связаться с поддержкой (в боте)", callback_data="contact_support"))
-    if DEFAULT_ADMIN_ID:
-        kb.add(types.InlineKeyboardButton("🔐 Админ", callback_data="admin_panel"))
-    return kb
-
-# ----------------------- Flask endpoints -----------------------
+# -------------------------
+# Flask endpoints: CryptoBot IPN and Telegram webhook
+# -------------------------
 @app.route("/cryptobot/ipn", methods=["POST"])
 def cryptobot_ipn():
     try:
         payload = request.get_json(force=True)
-    except Exception:
+    except:
         return jsonify({"ok": False, "error": "bad json"}), 400
-    # log
+    # log payload
     try:
         with open(IPN_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps({"time": datetime.utcnow().isoformat(), "payload": payload}, ensure_ascii=False) + "\n")
     except:
         pass
     invoice_id = None
-    for k in ("invoiceId","invoice_id","id","paymentId","payment_id"):
+    for k in ("invoiceId","invoice_id","id"):
         if k in payload:
             invoice_id = str(payload[k]); break
-    status_field = None
-    for k in ("status","paymentStatus","payment_status","state"):
-        if k in payload:
-            status_field = payload[k]; break
-    order_uid = payload.get("payload") or payload.get("order") or payload.get("comment") or payload.get("merchant_order_id")
+    status_field = payload.get("status") or payload.get("paymentStatus") or payload.get("state")
+    paid_indicators = {"paid","success","confirmed","finished","complete"}
     st = str(status_field).lower() if status_field else ""
-    paid_indicators = {"paid","success","finished","confirmed","complete"}
     if any(p in st for p in paid_indicators):
+        # try mapping by invoice id
         if invoice_id:
-            mapping = get_invoice_map(invoice_id)
-            if mapping:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM invoices_map WHERE invoice_id = ?", (invoice_id,))
+            r = cur.fetchone()
+            conn.close()
+            if r:
                 try:
-                    chat_id = int(mapping["chat_id"]); order_id = int(mapping["order_id"])
-                    update_order_status_db(order_id, "оплачен")
-                    try:
-                        bot.send_message(chat_id, f"🔔 Платёж подтверждён. Заказ #{order_id} помечен как оплачен.")
-                    except:
-                        pass
-                    return jsonify({"ok": True}), 200
+                    oid = int(r["order_id"])
+                    # update orders table
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("UPDATE orders SET status = ? WHERE id = ?", ("оплачен", oid))
+                    conn.commit(); conn.close()
                 except:
                     pass
-        if order_uid and isinstance(order_uid,str) and "_" in order_uid:
-            try:
-                parts = order_uid.split("_"); chat = int(parts[0]); oid = int(parts[1])
-                update_order_status_db(oid, "оплачен")
-                try:
-                    bot.send_message(chat, f"🔔 Платёж подтверждён. Заказ #{oid} помечен оплачен.")
-                except:
-                    pass
-                return jsonify({"ok": True}), 200
-            except:
-                pass
     return jsonify({"ok": True}), 200
 
 @app.route("/" + BOT_TOKEN, methods=["POST"])
@@ -770,39 +875,47 @@ def telegram_webhook():
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Bot is running", 200
+    return "Bot OK", 200
 
-# ----------------------- Startup -----------------------
-def set_telegram_webhook_if_needed():
+# -------------------------
+# Startup: set webhook if needed
+# -------------------------
+def set_telegram_webhook():
     if not USE_WEBHOOK:
         print("USE_WEBHOOK not set; skipping Telegram webhook setup.")
         return
     if not WEB_DOMAIN:
-        print("WEB_DOMAIN not set; cannot configure webhook.")
+        print("WEB_DOMAIN empty; cannot set webhook.")
         return
     webhook_url = WEB_DOMAIN.rstrip("/") + "/" + BOT_TOKEN
     try:
         bot.remove_webhook()
         time.sleep(0.5)
         res = bot.set_webhook(url=webhook_url)
-        print("Set Telegram webhook to:", webhook_url, "result:", res)
+        print("Webhook set:", webhook_url, "result:", res)
     except Exception as e:
         print("Failed set webhook:", e)
 
+# -------------------------
+# Ensure initial operators exist in DB
+# -------------------------
+for op in INITIAL_OPERATORS:
+    add_operator(op)
+
+# -------------------------
 # Run
+# -------------------------
 if __name__ == "__main__":
-    print("Starting SaleTest full service")
+    print("Starting SaleTest service")
     init_db()
-    # Create default admin in support_agents if not exist
-    if DEFAULT_ADMIN_ID:
-        add_support_agent(DEFAULT_ADMIN_ID, username=None, display_name="Owner")
-    if RUN_LOCAL_POLLING:
-        from threading import Thread
-        t = Thread(target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False), daemon=True)
-        t.start()
-        print("Local Flask started on 5000; starting polling...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=20)
+    if USE_WEBHOOK:
+        set_telegram_webhook()
+        print("Running Flask (webhook mode)...")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
     else:
-        set_telegram_webhook_if_needed()
-        print("Starting Flask app (production)...")
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
+        # for local testing
+        from threading import Thread
+        t = Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True)
+        t.start()
+        print("Running polling (local)...")
+        bot.infinity_polling(timeout=60, long_polling_timeout=20)
