@@ -24,7 +24,10 @@ import telebot
 from telebot import types
 
 # ----------------------- НАСТРОЙКИ -----------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN or ":" not in BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN is not set correctly! Check your Render environment variables.")
+
 CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"  # вставь свой Cryptobot API token, если хочешь
 # Список юзернеймов внешней поддержки, разделённый запятой (показываются в меню)
 SUPPORT_USERNAMES = os.environ.get("SUPPORT_USERNAMES") or "@Urikossan"
