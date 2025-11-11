@@ -26,7 +26,7 @@ from telebot import types
 # КОНФИГ (можно переопределять через ENV)
 # -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
-CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"
+CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AAwPvRj3LLlT0vDY4LSFh0Vt2gIUCqlQfWw"
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"
 USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == "1"
 ADMIN_IDS = set([int(os.environ.get("ADMIN_ID") or 1942740947)])
@@ -496,6 +496,7 @@ def cb_all(call):
 
         # --- currency pay button: pay_asset_<chatid>_<orderid>_<asset>
         if data.startswith("pay_asset_"):
+            print("DEBUG CALLBACK =>", data)
             try:
                 _, chat_str, orderid_str, asset = data.split("_", 3)
                 order_chat = int(chat_str); order_id = int(orderid_str)
