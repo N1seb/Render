@@ -364,12 +364,59 @@ def packages_markup(cat_key):
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back"))
     return kb
 
-def currency_selection_markup(chat_id:int, order_id:int):
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for code, _ in AVAILABLE_ASSETS:
-        kb.add(types.InlineKeyboardButton(f"{code}", callback_data=f"pay_asset_{chat_id}_{order_id}_{code}"))
-    kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_payment"))
-    return kb
+# --- currency pay button: pay_asset_chatid_orderid_asset
+if data.startswith("pay_asset_"):
+    try:
+        _, chat_str, orderid_str, asset = data.split("_", 3)
+        order_chat = int(chat_str)
+        order_id = int(orderid_str)
+    except Exception:
+        bot.answer_callback_query(call.id, "Неверный формат заказа")
+        return
+
+    # fetch order
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        bot.answer_callback_query(call.id, "Заказ не найден")
+        return
+
+    price_usd = float(row["price_usd"])
+    pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
+
+    order_uid = f"{order_chat}_{order_id}"
+    description = f"Заказ #{order_id} {row['category']}"
+    callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
+
+    resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
+
+    if isinstance(resp, dict) and resp.get("error"):
+        bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
+        bot.answer_callback_query(call.id, "Ошибка")
+        return
+
+    invoice_id = resp.get("invoiceId") or resp.get("id")
+    pay_url = resp.get("pay_url") or resp.get("payment_url") or resp.get("result", {}).get("pay_url")
+
+    if invoice_id:
+        set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
+        update_order_invoice(order_id, str(invoice_id), pay_url)
+
+    if pay_url:
+        try:
+            qr_bytes = generate_qr_bytes(pay_url)
+            bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
+        except:
+            bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
+    else:
+        bot.send_message(order_chat, "Не удалось получить ссылку на оплату. Обратитесь в поддержку.")
+
+    bot.answer_callback_query(call.id)
+    return
+
 
 # -------------------------
 # In-memory short states
