@@ -474,14 +474,56 @@ def cb_all(call):
         bot.answer_callback_query(call.id)
         return
 
-    # currency pay button: format pay_asset_{chat_order}_{ASSET}
+    # currency pay button: format pay_asset_{chatid}_{orderid}_{ASSET}
     if data.startswith("pay_asset_"):
-        # parse
         try:
-            _, order_ref, asset = data.split("_", 2)
+            _, chat_str, orderid_str, asset = data.split("_", 3)
+            order_chat = int(chat_str)
+            order_id = int(orderid_str)
         except:
-            bot.answer_callback_query(call.id, "Неверные данные оплаты")
+            bot.answer_callback_query(call.id, "Неверный формат заказа")
             return
+
+        # получить заказ
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            bot.answer_callback_query(call.id, "Заказ не найден")
+            return
+
+        price_rub = float(row["price"])
+        pay_amount = convert_price_rub_to_asset(price_rub, asset.upper())
+
+        order_uid = f"{order_chat}_{order_id}"
+        description = f"Заказ #{order_id} {row['category']}"
+        callback_url = (WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn") if WEB_DOMAIN else None
+
+        resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
+
+        if isinstance(resp, dict) and resp.get("error"):
+            bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
+            bot.answer_callback_query(call.id, "Ошибка")
+            return
+
+        invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or resp.get("id")
+        pay_url = (
+            resp.get("pay_url")
+            or resp.get("payment_url")
+            or (resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None)
+        )
+
+        if invoice_id:
+            set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
+            update_order_invoice(order_id, str(invoice_id), pay_url)
+
+        qr_bytes = generate_qr_bytes(pay_url)
+        bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
+        bot.answer_callback_query(call.id, "Счёт создан, проверьте сообщения")
+        return
+
         # order_ref is like "chatid-orderid" or "chatid_orderid" — we will use chatid_orderid created below
 # currency pay button: format pay_asset_{chatid}_{orderid}_{ASSET}
 if data.startswith("pay_asset_"):
