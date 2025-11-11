@@ -22,7 +22,7 @@ from flask import Flask, request, jsonify
 import telebot
 from telebot import types
 
-# -------------------------
+# ------------------------- 
 # КОНФИГ (можно переопределять через ENV)
 # -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
@@ -51,6 +51,10 @@ PRETTY = {"sub": "Подписчики", "view": "Просмотры", "com": "�
 # -------------------------
 # Инициализация
 # -------------------------
+# simple token sanity check
+if not BOT_TOKEN or ":" not in BOT_TOKEN:
+    raise ValueError("BOT_TOKEN must be set and contain a colon (:).")
+
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 app = Flask(__name__)
 
@@ -338,7 +342,10 @@ operator_state: Dict[int, Dict[str, Any]] = {}
 # Ensure initial operators exist
 # -------------------------
 for op in INITIAL_OPERATORS:
-    add_operator(op)
+    try:
+        add_operator(op)
+    except Exception:
+        pass
 
 # -------------------------
 # Bot handlers
@@ -494,76 +501,77 @@ def cb_all(call):
             bot.answer_callback_query(call.id)
             return
 
-# --- currency pay button: pay_asset_chatid_orderid_asset
-    if data.startswith("pay_asset_"):
-        bot.answer_callback_query(call.id)  # сразу подтверждаем
+        # --- currency pay button: pay_asset_chatid_orderid_asset
+        if data.startswith("pay_asset_"):
+            # confirm callback quickly
+            bot.answer_callback_query(call.id)
 
-    # Убираем префикс
-    payload = data.replace("pay_asset_", "", 1)
+            # Убираем префикс
+            payload = data.replace("pay_asset_", "", 1)
 
-    # Разбираем безопасно (независимо от количества _)
-    parts = payload.split("_")
-    if len(parts) < 3:
-        bot.send_message(cid, "Ошибка: не хватает данных для оплаты")
-        return
+            # Разбираем безопасно (независимо от количества _)
+            parts = payload.split("_")
+            if len(parts) < 3:
+                bot.send_message(cid, "Ошибка: не хватает данных для оплаты")
+                return
 
-    chat_str = parts[0]
-    orderid_str = parts[1]
-    asset = parts[2]
+            chat_str = parts[0]
+            orderid_str = parts[1]
+            asset = parts[2]
 
-    # проверяем числа
-    if not chat_str.isdigit() or not orderid_str.isdigit():
-        bot.send_message(cid, "Ошибка: неверные данные заказа")
-        return
+            # проверяем числа
+            if not chat_str.isdigit() or not orderid_str.isdigit():
+                bot.send_message(cid, "Ошибка: неверные данные заказа")
+                return
 
-    order_chat = int(chat_str)
-    order_id = int(orderid_str)
+            order_chat = int(chat_str)
+            order_id = int(orderid_str)
 
-    # Загружаем заказ из БД
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-    row = cur.fetchone()
-    conn.close()
+            # Загружаем заказ из БД
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+            row = cur.fetchone()
+            conn.close()
 
-    if not row:
-        bot.send_message(cid, "Заказ не найден")
-        return
+            if not row:
+                bot.send_message(cid, "Заказ не найден")
+                return
 
-    price_usd = float(row["price_usd"])
-    pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
+            price_usd = float(row["price_usd"])
+            pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
 
-    order_uid = f"{order_chat}_{order_id}"
-    description = f"Заказ #{order_id} {row['category']}"
-    callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
+            order_uid = f"{order_chat}_{order_id}"
+            description = f"Заказ #{order_id} {row['category']}"
+            callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
 
-    resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
+            resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
 
-    invoice_id = (resp.get("invoiceId")
-                  or resp.get("invoice_id")
-                  or resp.get("id"))
+            invoice_id = (resp.get("invoiceId")
+                          or resp.get("invoice_id")
+                          or resp.get("id"))
 
-    pay_url = (
-        resp.get("pay_url")
-        or resp.get("payment_url")
-        or (resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None)
-    )
+            pay_url = (
+                resp.get("pay_url")
+                or resp.get("payment_url")
+                or (resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None)
+            )
 
-    if invoice_id:
-        set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
-        update_order_invoice(order_id, str(invoice_id), pay_url)
+            if invoice_id:
+                set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
+                update_order_invoice(order_id, str(invoice_id), pay_url)
 
-    if pay_url:
-        try:
-            qr_bytes = generate_qr_bytes(pay_url)
-            bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
-        except Exception:
-            bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
-    else:
-        bot.send_message(order_chat, "Ошибка: нет ссылки на оплату")
+            if pay_url:
+                try:
+                    qr_bytes = generate_qr_bytes(pay_url)
+                    bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
+                except Exception:
+                    bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
+            else:
+                bot.send_message(order_chat, "Ошибка: нет ссылки на оплату")
+            return
 
-
-        # Unknown command
+        # Unknown or unhandled callback
         bot.answer_callback_query(call.id, "Неизвестная команда.")
     except Exception as e:
         try:
