@@ -495,8 +495,8 @@ def cb_all(call):
             return
 
 # --- currency pay button: pay_asset_chatid_orderid_asset
-if data.startswith("pay_asset_"):
-    bot.answer_callback_query(call.id)  # сразу подтверждаем
+    if data.startswith("pay_asset_"):
+        bot.answer_callback_query(call.id)  # сразу подтверждаем
 
     # Убираем префикс
     payload = data.replace("pay_asset_", "", 1)
