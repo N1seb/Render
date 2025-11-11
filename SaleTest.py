@@ -372,7 +372,7 @@ if data.startswith("pay_asset_"):
         order_id = int(orderid_str)
     except Exception:
         bot.answer_callback_query(call.id, "Неверный формат заказа")
-        return
+            return
     # fetch order
     conn = get_db()
     cur = conn.cursor()
