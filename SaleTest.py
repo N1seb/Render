@@ -47,7 +47,6 @@ AVAILABLE_ASSETS = [
 ]
 
 # Услуги и цены в USD (пример). Можно менять.
-# Значения — price per package (чтобы можно было масштабировать, сейчас офферы у нас в количественном виде)
 OFFERS_USD = {
     "sub": {"100": 1.0, "500": 4.0, "1000": 7.0},
     "view": {"1000": 0.5, "5000": 2.0, "10000": 3.5},
@@ -167,6 +166,10 @@ def add_operator(chat_id:int, username:Optional[str]=None, display_name:Optional
     cur.execute("INSERT OR IGNORE INTO operators (chat_id, username, display_name, created_at) VALUES (?, ?, ?, ?)",
                 (chat_id, username, display_name, now))
     conn.commit()
+    conn.close()
+    # ensure notification row exists
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO operator_notifications (operator_chat, message_id, created_at) VALUES (?, ?, ?)",
                 (chat_id, None, now))
     conn.commit()
@@ -274,10 +277,6 @@ def add_support_message(req_id:int, from_chat:int, to_chat:int, text:str):
 # CryptoBot helpers (createInvoice + getInvoice)
 # -------------------------
 def create_cryptobot_invoice(amount_value:float, asset:str, payload:str, description:str, callback_url:Optional[str]=None):
-    """
-    Создаёт invoice через CryptoBot API.
-    Возвращает dict ответа или {'error': True, ...}
-    """
     url = CRYPTO_API_BASE + "/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTOPAY_API_TOKEN, "Content-Type": "application/json"}
     payload_body = {
@@ -324,7 +323,7 @@ def generate_qr_bytes(url:str) -> bytes:
 # -------------------------
 def convert_price_usd_to_asset(price_usd: float, asset: str) -> float:
     """
-    Конвертация USD -> asset (USDT/TON/другие крипто)
+    Конвертация USD -> asset (TON/USDT/другие крипто)
     Через CoinGecko public API. Возвращает сумму в asset (число).
     """
     asset = asset.upper()
@@ -340,10 +339,8 @@ def convert_price_usd_to_asset(price_usd: float, asset: str) -> float:
             ton_usd = float(j["toncoin"]["usd"])
             return round(price_usd / ton_usd, 6)
         # другие крипты: fallback to dividing by 1 (leave as USD-like), or request specific id if needed
-        # For simplicity, return price_usd (treat asset as same unit)
         return round(price_usd, 6)
     except Exception:
-        # fallback safe
         return round(price_usd, 6)
 
 # -------------------------
@@ -409,7 +406,7 @@ def cb_all(call):
 
     # SUPPORT: personal instruction
     if data == "support_personal":
-        bot.edit_message_text("📨 Для связи в личных сообщениях — нажмите кнопку 'В личных сообщениях' и найдите оператора в Telegram.\n\nЧтобы написать через бота — нажмите 'Написать в поддержку (в боте)'.", cid, call.message.message_id)
+        bot.edit_message_text("📨 Для связи в личных сообщениях — найдите оператора в Telegram.\n\nЧтобы написать через бота — нажмите 'Написать в поддержку (в боте)'.", cid, call.message.message_id)
         return
 
     # SUPPORT: via bot
@@ -493,7 +490,7 @@ def cb_all(call):
         bot.send_message(cid, f"Заказ #{oid} отменён.")
         return
 
-    # --- currency pay button: format pay_asset_{chatid}_{orderid}_{ASSET}
+    # --- currency pay button: pay_asset_chatid_orderid_asset
     if data.startswith("pay_asset_"):
         try:
             _, chat_str, orderid_str, asset = data.split("_", 3)
@@ -624,7 +621,6 @@ def notify_all_operators_new_request():
                 sent = bot.send_message(op_chat, notif_text, reply_markup=kb)
                 _store_operator_notification(op_chat, sent.message_id)
         except Exception:
-            # operator didn't start bot or blocked -> clear stored id
             _store_operator_notification(op_chat, None)
 
 def _store_operator_notification(op_chat:int, msg_id:Optional[int]):
@@ -755,7 +751,6 @@ def handle_text(m):
             bot.reply_to(m, f"Минимум {state.get('min_allowed')}")
             return
         # price logic: for demo, price = amount * base_usd_per_unit (here 0.01)
-        # Better: you can define your pricing per unit. For now take 0.01 USD per unit.
         base_unit_price = 0.01
         price_usd = round(amount * base_unit_price, 2)
         order_id = create_order_record(cid, state["category"], amount, price_usd, "USD")
@@ -771,7 +766,6 @@ def handle_text(m):
             return
         category = state["order_category"]
         amount = state["order_amount"]
-        # price from OFFERS_USD
         price_usd = float(OFFERS_USD.get(category, {}).get(str(amount), amount * 0.01))
         order_id = create_order_record(cid, category, amount, price_usd, "USD", link=link)
         user_state.pop(cid, None)
