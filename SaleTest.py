@@ -372,13 +372,15 @@ if data.startswith("pay_asset_"):
         order_id = int(orderid_str)
     except Exception:
         bot.answer_callback_query(call.id, "Неверный формат заказа")
-            return
+        return
+
     # fetch order
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
     row = cur.fetchone()
     conn.close()
+
     if not row:
         bot.answer_callback_query(call.id, "Заказ не найден")
         return
