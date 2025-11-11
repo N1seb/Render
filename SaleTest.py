@@ -494,51 +494,74 @@ def cb_all(call):
             bot.answer_callback_query(call.id)
             return
 
-        # --- currency pay button: pay_asset_<chatid>_<orderid>_<asset>
-        if data.startswith("pay_asset_"):
-            print("DEBUG CALLBACK =>", data)
-            try:
-                _, chat_str, orderid_str, asset = data.split("_", 3)
-                order_chat = int(chat_str); order_id = int(orderid_str)
-            except Exception:
-                bot.answer_callback_query(call.id, "Неверный формат заказа"); return
+# --- currency pay button: pay_asset_chatid_orderid_asset
+if data.startswith("pay_asset_"):
+    bot.answer_callback_query(call.id)  # сразу подтверждаем
 
-            conn = get_db(); cur = conn.cursor()
-            cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-            row = cur.fetchone(); conn.close()
-            if not row:
-                bot.answer_callback_query(call.id, "Заказ не найден"); return
+    # Убираем префикс
+    payload = data.replace("pay_asset_", "", 1)
 
-            price_usd = float(row["price_usd"])
-            pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
+    # Разбираем безопасно (независимо от количества _)
+    parts = payload.split("_")
+    if len(parts) < 3:
+        bot.send_message(cid, "Ошибка: не хватает данных для оплаты")
+        return
 
-            order_uid = f"{order_chat}_{order_id}"
-            description = f"Заказ #{order_id} {row['category']}"
-            callback_url = (WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn") if WEB_DOMAIN else None
+    chat_str = parts[0]
+    orderid_str = parts[1]
+    asset = parts[2]
 
-            resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
-            if isinstance(resp, dict) and resp.get("error"):
-                bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
-                bot.answer_callback_query(call.id, "Ошибка")
-                return
+    # проверяем числа
+    if not chat_str.isdigit() or not orderid_str.isdigit():
+        bot.send_message(cid, "Ошибка: неверные данные заказа")
+        return
 
-            invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or resp.get("id")
-            pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None)
+    order_chat = int(chat_str)
+    order_id = int(orderid_str)
 
-            if invoice_id:
-                set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
-                update_order_invoice(order_id, str(invoice_id), pay_url)
+    # Загружаем заказ из БД
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+    row = cur.fetchone()
+    conn.close()
 
-            if pay_url:
-                try:
-                    qr_bytes = generate_qr_bytes(pay_url)
-                    bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
-                except Exception:
-                    bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
-            else:
-                bot.send_message(order_chat, "Не удалось получить ссылку на оплату. Обратитесь в поддержку.")
-            bot.answer_callback_query(call.id, "Счёт создан, проверьте сообщения")
-            return
+    if not row:
+        bot.send_message(cid, "Заказ не найден")
+        return
+
+    price_usd = float(row["price_usd"])
+    pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
+
+    order_uid = f"{order_chat}_{order_id}"
+    description = f"Заказ #{order_id} {row['category']}"
+    callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
+
+    resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
+
+    invoice_id = (resp.get("invoiceId")
+                  or resp.get("invoice_id")
+                  or resp.get("id"))
+
+    pay_url = (
+        resp.get("pay_url")
+        or resp.get("payment_url")
+        or (resp.get("result", {}).get("pay_url") if isinstance(resp, dict) else None)
+    )
+
+    if invoice_id:
+        set_invoice_mapping(str(invoice_id), order_chat, order_id, raw_payload=resp)
+        update_order_invoice(order_id, str(invoice_id), pay_url)
+
+    if pay_url:
+        try:
+            qr_bytes = generate_qr_bytes(pay_url)
+            bot.send_photo(order_chat, qr_bytes, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
+        except Exception:
+            bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
+    else:
+        bot.send_message(order_chat, "Ошибка: нет ссылки на оплату")
+
 
         # Unknown command
         bot.answer_callback_query(call.id, "Неизвестная команда.")
