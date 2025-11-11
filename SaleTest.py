@@ -373,7 +373,6 @@ if data.startswith("pay_asset_"):
     except Exception:
         bot.answer_callback_query(call.id, "Неверный формат заказа")
         return
-
     # fetch order
     conn = get_db()
     cur = conn.cursor()
