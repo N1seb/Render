@@ -440,7 +440,6 @@ def services_markup_for_social(social):
     kb = types.InlineKeyboardMarkup(row_width=1)
     services = SERVICES.get(social, {})
     for key, info in services.items():
-        # show short price example: price per unit (unit explained)
         unit = info.get("unit",1)
         price = info.get("price_usd_per_unit", 0.0)
         if unit > 1:
@@ -452,7 +451,6 @@ def services_markup_for_social(social):
     return kb
 
 def currency_selection_markup_for_order(chat_id:int, order_ref:str):
-    # order_ref for single order: "order_<chatid>_<orderid>"
     kb = types.InlineKeyboardMarkup(row_width=3)
     for asset in AVAILABLE_ASSETS:
         kb.add(types.InlineKeyboardButton(asset, callback_data=f"pay_asset_{order_ref}_{asset}"))
@@ -489,7 +487,6 @@ def cmd_start(m):
     ensure_user(m.chat.id, m)
     bot.send_message(m.chat.id, "🧸 Добро пожаловать! Выберите действие:", reply_markup=main_menu_markup())
 
-# (часть продолжается далее...)
 @bot.callback_query_handler(func=lambda c: True)
 def cb_all(call):
     try:
@@ -667,6 +664,7 @@ def cb_all(call):
             bot.answer_callback_query(call.id, "Ошибка обработки")
         except:
             pass
+
 # -------------------------
 # Support notifications / listing
 # -------------------------
@@ -861,6 +859,20 @@ def telegram_webhook():
 @app.route("/", methods=["GET"])
 def index():
     return "Bot OK", 200
+
+# -------------------------
+# Webhook setup helper (INSERTED)
+# -------------------------
+def set_telegram_webhook():
+    """Устанавливает webhook для Telegram бота"""
+    try:
+        webhook_url = WEB_DOMAIN.rstrip("/") + "/" + BOT_TOKEN
+        bot.remove_webhook()
+        time.sleep(1)
+        res = bot.set_webhook(url=webhook_url)
+        print(f"✅ Webhook установлен: {webhook_url} -> {res}")
+    except Exception as e:
+        print(f"Ошибка установки webhook: {e}")
 
 # -------------------------
 # Startup
