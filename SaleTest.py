@@ -1080,3 +1080,120 @@ if __name__ == "__main__":
         t.start()
         print("Running polling (local)...")
         bot.infinity_polling(timeout=60, long_polling_timeout=20)
+
+# -------------------------
+# Diagnostics / Maintenance / Utilities
+# -------------------------
+
+@app.route("/diag", methods=["GET"])
+def diag_info():
+    try:
+        info = {
+            "bot_username": bot.get_me().username if bot.get_me() else None,
+            "db_file_exists": os.path.exists(DB_FILE),
+            "file_size_bytes": os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0,
+            "active_threads": len(os.listdir("/proc/self/task")) if os.path.exists("/proc/self/task") else "n/a",
+            "time": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        info = {"error": str(e)}
+    return jsonify(info)
+
+def backup_db():
+    try:
+        if not os.path.exists(DB_FILE):
+            return
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"{DB_FILE}.{ts}.bak"
+        with open(DB_FILE, "rb") as fsrc, open(backup_name, "wb") as fdst:
+            fdst.write(fsrc.read())
+        print(f"[Backup] Database backed up to {backup_name}")
+    except Exception as e:
+        print("[Backup] Error:", e)
+
+def periodic_backup(interval_sec=3600):
+    while True:
+        time.sleep(interval_sec)
+        backup_db()
+
+# -------------------------
+# Health / restart helpers
+# -------------------------
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"ok": True, "time": datetime.utcnow().isoformat()}), 200
+
+def restart_bot():
+    print("[Restart] Restarting bot process...")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+# -------------------------
+# Database dump (for admin only)
+# -------------------------
+@bot.message_handler(commands=['dbdump'])
+def dump_db(m):
+    if m.from_user.id not in ADMIN_IDS:
+        bot.reply_to(m, "Нет доступа.")
+        return
+    try:
+        with open(DB_FILE, "rb") as f:
+            bot.send_document(m.chat.id, f)
+    except Exception as e:
+        bot.reply_to(m, f"Ошибка при выгрузке БД: {e}")
+
+# -------------------------
+# DB auto-backup thread
+# -------------------------
+Thread(target=periodic_backup, daemon=True).start()
+
+# -------------------------
+# Admin broadcast utility
+# -------------------------
+@bot.message_handler(commands=['broadcast'])
+def admin_broadcast(m):
+    if m.from_user.id not in ADMIN_IDS:
+        bot.reply_to(m, "Нет доступа.")
+        return
+    text = m.text.partition(' ')[2].strip()
+    if not text:
+        bot.reply_to(m, "Использование: /broadcast <текст>")
+        return
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT chat_id FROM users")
+    users = [r["chat_id"] for r in cur.fetchall()]
+    conn.close()
+    count = 0
+    for uid in users:
+        try:
+            bot.send_message(uid, text)
+            count += 1
+            time.sleep(0.05)
+        except:
+            continue
+    bot.reply_to(m, f"✅ Рассылка завершена, доставлено: {count}/{len(users)}")
+
+# -------------------------
+# Safety net for crash recovery
+# -------------------------
+def safe_polling():
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=25)
+        except Exception as e:
+            print("[Polling crash]", e)
+            time.sleep(5)
+
+# -------------------------
+# Final startup (redundant for safety)
+# -------------------------
+if __name__ == "__main__":
+    print("✅ SaleTest_full ready — running main loop...")
+    init_db()
+    if USE_WEBHOOK:
+        set_telegram_webhook()
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+    else:
+        Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True).start()
+        Thread(target=periodic_backup, daemon=True).start()
+        safe_polling()
