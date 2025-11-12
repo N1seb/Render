@@ -489,6 +489,7 @@ def cmd_start(m):
     ensure_user(m.chat.id, m)
     bot.send_message(m.chat.id, "🧸 Добро пожаловать! Выберите действие:", reply_markup=main_menu_markup())
 
+# (часть продолжается далее...)
 @bot.callback_query_handler(func=lambda c: True)
 def cb_all(call):
     try:
@@ -526,7 +527,6 @@ def cb_all(call):
 
         # service selected (start qty flow)
         if data.startswith("service_"):
-            # format service_{social}_{key}
             _, social, key = data.split("_", 2)
             svc = SERVICES.get(social, {}).get(key)
             if not svc:
@@ -535,7 +535,6 @@ def cb_all(call):
             min_allowed = svc.get("min",1)
             unit = svc.get("unit",1)
             price_unit = svc.get("price_usd_per_unit", 0.0)
-            # state: awaiting quantity (user will input number of units/items)
             user_state[cid] = {"awaiting_qty_for": True, "social": social, "service_key": key,
                                "min": min_allowed, "unit": unit, "price_unit": price_unit}
             bot.send_message(cid, f"Вы выбрали: {svc['title']} для {social}.\nМинимум: {min_allowed}. Введите количество (целое число):")
@@ -544,7 +543,6 @@ def cb_all(call):
 
         # profile/cart
         if data == "profile":
-            # show cart summary + orders
             cart_id = get_or_create_cart(cid)
             items = get_cart_items(cart_id)
             txt = "🧾 Ваша корзина:\n\n"
@@ -560,7 +558,6 @@ def cb_all(call):
                 kb.add(types.InlineKeyboardButton("Очистить корзину", callback_data=f"cart_clear_{cart_id}"))
             else:
                 txt += "Корзина пуста.\n\n"
-            # list user's individual orders
             conn = get_db(); cur = conn.cursor()
             cur.execute("SELECT * FROM orders WHERE chat_id = ? ORDER BY id DESC LIMIT 10", (cid,))
             rows = cur.fetchall(); conn.close()
@@ -581,7 +578,6 @@ def cb_all(call):
                 return
             remove_cart_item(item_id)
             bot.answer_callback_query(call.id, "Удалено")
-            # update message: we'll try to edit to show new cart; if fails, send new message
             try:
                 bot.edit_message_text("Элемент удалён. Откройте Корзина/Профиль снова.", cid, call.message.message_id)
             except Exception:
@@ -603,27 +599,24 @@ def cb_all(call):
                 pass
             return
 
-        # cart pay selected -> show asset options
+        # cart pay selected
         if data.startswith("cart_pay_"):
             try:
                 cart_id = int(data.split("_")[-1])
             except:
                 bot.answer_callback_query(call.id, "Ошибка")
                 return
-            # compute total
             items = get_cart_items(cart_id)
             if not items:
                 bot.answer_callback_query(call.id, "Корзина пуста")
                 return
             total = sum(float(it['price_usd']) for it in items)
-            # reply markup: available assets
             bot.send_message(cid, f"Сумма к оплате: ${total:.2f}. Выберите валюту:", reply_markup=currency_selection_markup_for_cart(cid, cart_id))
             bot.answer_callback_query(call.id)
             return
 
         # pay cart in asset
         if data.startswith("pay_cart_"):
-            # format pay_cart_<chatid>_<cartid>_<asset>
             parts = data.split("_", 3)
             if len(parts) != 4:
                 bot.answer_callback_query(call.id, "Неверные данные оплаты"); return
@@ -635,7 +628,6 @@ def cb_all(call):
             if not items:
                 bot.answer_callback_query(call.id, "Корзина пуста"); return
             total_usd = sum(float(it['price_usd']) for it in items)
-            # convert to asset
             pay_amount = convert_price_usd_to_asset(total_usd, asset.upper())
             order_uid = f"cart_{order_chat}_{cart_id}_{int(time.time())}"
             description = f"Оплата корзины #{cart_id} пользователем {order_chat}"
@@ -647,10 +639,8 @@ def cb_all(call):
                 return
             invoice_id = resp.get("invoiceId") or resp.get("id")
             pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result",{}).get("pay_url") if isinstance(resp, dict) else None)
-            # map invoice -> cart
             if invoice_id:
                 set_invoice_mapping(str(invoice_id), order_chat, order_id=None, cart_id=cart_id, raw_payload=resp)
-            # send QR or link
             if pay_url:
                 try:
                     qr = generate_qr_bytes(pay_url)
@@ -662,47 +652,6 @@ def cb_all(call):
             bot.answer_callback_query(call.id, "Счёт создан, проверьте сообщения")
             return
 
-        # pay single order: format pay_asset_order_<chatid>_<orderid>_<asset>
-        if data.startswith("pay_asset_order_"):
-            # format pay_asset_order_<chatid>_<orderid>_<asset>
-            try:
-                _, _, chat_str, orderid_str, asset = data.split("_", 4)
-            except:
-                bot.answer_callback_query(call.id, "Неверный формат"); return
-            if not chat_str.isdigit() or not orderid_str.isdigit():
-                bot.answer_callback_query(call.id, "Неверный формат"); return
-            order_chat = int(chat_str); order_id = int(orderid_str)
-            conn = get_db(); cur = conn.cursor()
-            cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-            r = cur.fetchone(); conn.close()
-            if not r:
-                bot.answer_callback_query(call.id, "Заказ не найден"); return
-            total_usd = float(r["price_usd"])
-            pay_amount = convert_price_usd_to_asset(total_usd, asset.upper())
-            order_uid = f"order_{order_chat}_{order_id}_{int(time.time())}"
-            description = f"Оплата заказа #{order_id}"
-            callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
-            resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
-            if isinstance(resp, dict) and resp.get("error"):
-                bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
-                bot.answer_callback_query(call.id, "Ошибка")
-                return
-            invoice_id = resp.get("invoiceId") or resp.get("id")
-            pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result",{}).get("pay_url") if isinstance(resp, dict) else None)
-            if invoice_id:
-                set_invoice_mapping(str(invoice_id), order_chat, order_id=order_id, cart_id=None, raw_payload=resp)
-                update_order_invoice(order_id, str(invoice_id), pay_url)
-            if pay_url:
-                try:
-                    qr = generate_qr_bytes(pay_url)
-                    bot.send_photo(order_chat, qr, caption=f"💳 Оплата заказа #{order_id} через {asset.upper()}\nСсылка: {pay_url}")
-                except Exception:
-                    bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
-            else:
-                bot.send_message(order_chat, "Не удалось получить ссылку на оплату.")
-            bot.answer_callback_query(call.id)
-            return
-
         # cancel payment
         if data == "cancel_payment":
             bot.answer_callback_query(call.id, "Оплата отменена")
@@ -712,63 +661,12 @@ def cb_all(call):
                 pass
             return
 
-        # noop (navigation placeholder)
-        if data == "noop":
-            bot.answer_callback_query(call.id)
-            return
-
-        # open support request list (for operators)
-        if data.startswith("open_requests_page_"):
-            try:
-                page = int(data.split("_")[-1])
-            except:
-                page = 1
-            show_requests_page(call.from_user.id, page, call.message)
-            bot.answer_callback_query(call.id)
-            return
-
-        # open request
-        if data.startswith("req_"):
-            try:
-                req_id = int(data.split("_")[1])
-            except:
-                bot.answer_callback_query(call.id, "Bad request id"); return
-            req = get_request_by_id(req_id)
-            if not req or req["status"] != "open":
-                bot.answer_callback_query(call.id, "Обращение не найдено или закрыто"); return
-            text = f"📨 Обращение #{req['id']}\nОт: {req['username']} (id {req['user_chat']})\n\n{req['text']}\n\nНажмите Ответить, чтобы отправить ответ и закрыть обращение."
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            kb.add(types.InlineKeyboardButton("Ответить", callback_data=f"reply_req_{req['id']}"))
-            kb.add(types.InlineKeyboardButton("Назад к списку", callback_data="open_requests_page_1"))
-            try:
-                bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
-            except Exception:
-                bot.send_message(call.message.chat.id, text, reply_markup=kb)
-            bot.answer_callback_query(call.id)
-            return
-
-        # reply to request
-        if data.startswith("reply_req_"):
-            try:
-                req_id = int(data.split("_")[-1])
-            except:
-                bot.answer_callback_query(call.id, "Bad conv id"); return
-            # only operators allowed
-            if call.from_user.id not in [o["chat_id"] for o in list_operators()]:
-                bot.answer_callback_query(call.id, "У вас нет прав оператора"); return
-            operator_state[call.from_user.id] = {"awaiting_reply_for": req_id, "message_id": call.message.message_id}
-            bot.send_message(call.from_user.id, "Введите ответ для пользователя (сообщение будет отправлено и обращение закроется):")
-            bot.answer_callback_query(call.id)
-            return
-
-        bot.answer_callback_query(call.id, "Неизвестная команда.")
     except Exception:
         traceback.print_exc()
         try:
             bot.answer_callback_query(call.id, "Ошибка обработки")
         except:
             pass
-
 # -------------------------
 # Support notifications / listing
 # -------------------------
@@ -835,7 +733,7 @@ def show_requests_page(operator_chat:int, page:int, message_reference=None):
             pass
 
 # -------------------------
-# Text handler: quantities, links, support, admin commands
+# Text handler
 # -------------------------
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
@@ -851,10 +749,7 @@ def handle_text(m):
             parts = text.split()
             if len(parts) != 2:
                 bot.reply_to(m, "Использование: /add_operator <chat_id>"); return
-            try:
-                new_id = int(parts[1])
-            except:
-                bot.reply_to(m, "Bad id"); return
+            new_id = int(parts[1])
             add_operator(new_id, username=None, display_name=None)
             bot.reply_to(m, f"Добавлен оператор {new_id}"); return
 
@@ -864,10 +759,7 @@ def handle_text(m):
             parts = text.split()
             if len(parts) != 2:
                 bot.reply_to(m, "Использование: /operator_remove <chat_id>"); return
-            try:
-                rem = int(parts[1])
-            except:
-                bot.reply_to(m, "Bad id"); return
+            rem = int(parts[1])
             remove_operator(rem)
             bot.reply_to(m, f"Удалён оператор {rem}"); return
 
@@ -882,54 +774,8 @@ def handle_text(m):
                 s += f"- id: {o['chat_id']}, username: {o['username'] or '—'}, name: {o['display_name'] or '—'}\n"
             bot.reply_to(m, s); return
 
-        if text.startswith("/sadm"):
-            if m.from_user.id not in ADMIN_IDS:
-                bot.reply_to(m, "Нет прав."); return
-            conn = get_db(); cur = conn.cursor()
-            cur.execute("SELECT id, chat_id, social, service_key, amount, price_usd, status FROM orders ORDER BY id DESC LIMIT 100")
-            rows = cur.fetchall(); conn.close()
-            if not rows:
-                bot.reply_to(m, "Заказов нет."); return
-            txt = "Последние заказы:\n\n"
-            for r in rows:
-                txt += f"#{r['id']} uid:{r['chat_id']} {r['social']} {SERVICES[r['social']][r['service_key']]['title']} x{r['amount']} — ${r['price_usd']:.2f} — {r['status']}\n"
-            bot.reply_to(m, txt); return
-
-        # States:
+        # Support & reply
         state = user_state.get(cid)
-
-        # awaiting quantity
-        if state and state.get("awaiting_qty_for"):
-            if not text.isdigit():
-                bot.reply_to(m, "Введите целое число."); return
-            qty = int(text)
-            minq = state.get("min",1)
-            if qty < minq:
-                bot.reply_to(m, f"Минимум {minq}"); return
-            unit = state.get("unit",1)
-            price_unit = float(state.get("price_unit",0.0))
-            # price = price_unit * (qty / unit)
-            price = price_unit * (qty / unit)
-            price = round(price, 2)
-            # ask for link if required by service (we'll always ask link for safety)
-            user_state[cid] = {"awaiting_link_for": True, "social": state["social"], "service_key": state["service_key"], "quantity": qty, "price_usd": price}
-            bot.reply_to(m, f"Цена: ${price:.2f}. Теперь отправьте ссылку на пост/аккаунт/канал (http/https):")
-            return
-
-        # awaiting link
-        if state and state.get("awaiting_link_for"):
-            link = text
-            if not (link.startswith("http://") or link.startswith("https://")):
-                bot.reply_to(m, "Неверная ссылка. Должна начинаться с http/https"); return
-            social = state["social"]; service_key = state["service_key"]; qty = state["quantity"]; price = float(state["price_usd"])
-            # add to cart
-            cart_id = get_or_create_cart(cid)
-            add_item_to_cart(cart_id, social, service_key, qty, link, price)
-            user_state.pop(cid, None)
-            bot.reply_to(m, f"✅ Товар добавлен в корзину. Цена: ${price:.2f}\nПерейти в неё: '🧾 Корзина / Профиль'", reply_markup=main_menu_markup())
-            return
-
-        # awaiting support
         if state and state.get("awaiting_support_msg"):
             user_state.pop(cid, None)
             uname = m.from_user.username or f"id{cid}"
@@ -938,7 +784,6 @@ def handle_text(m):
             notify_all_operators_new_request()
             return
 
-        # operator replying to request
         opstate = operator_state.get(cid)
         if opstate and opstate.get("awaiting_reply_for"):
             req_id = opstate["awaiting_reply_for"]
@@ -957,17 +802,13 @@ def handle_text(m):
             notify_all_operators_new_request()
             return
 
-        # fallback
         bot.send_message(cid, "Не понял. Нажми /start для меню.")
     except Exception:
         traceback.print_exc()
-        try:
-            bot.reply_to(m, "Внутренняя ошибка.")
-        except:
-            pass
+        bot.reply_to(m, "Ошибка обработки.")
 
 # -------------------------
-# Flask endpoints: CryptoBot IPN & Telegram webhook
+# Flask endpoints
 # -------------------------
 @app.route("/cryptobot/ipn", methods=["POST"])
 def cryptobot_ipn():
@@ -975,70 +816,46 @@ def cryptobot_ipn():
         payload = request.get_json(force=True)
     except:
         return jsonify({"ok": False, "error": "bad json"}), 400
-    # log
     try:
         with open(IPN_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps({"time": datetime.utcnow().isoformat(), "payload": payload}, ensure_ascii=False) + "\n")
-    except Exception:
+    except:
         pass
 
-    invoice_id = None
-    for k in ("invoiceId","invoice_id","id"):
-        if k in payload:
-            invoice_id = str(payload[k]); break
-
-    status_field = payload.get("status") or payload.get("paymentStatus") or payload.get("state")
-    paid_indicators = {"paid","success","confirmed","finished","complete"}
-    st = str(status_field).lower() if status_field else ""
-    if any(p in st for p in paid_indicators) and invoice_id:
+    invoice_id = str(payload.get("invoiceId") or payload.get("id") or "")
+    status = str(payload.get("status") or payload.get("paymentStatus") or "").lower()
+    if any(x in status for x in ["paid", "success", "confirmed", "finished"]):
         conn = get_db(); cur = conn.cursor()
         cur.execute("SELECT * FROM invoices_map WHERE invoice_id = ?", (invoice_id,))
         r = cur.fetchone()
         if r:
-            # either order_id or cart_id is present
-            try:
-                if r["order_id"]:
-                    oid = int(r["order_id"])
-                    cur.execute("UPDATE orders SET status = ? WHERE id = ?", ("оплачен", oid))
-                    conn.commit()
-                    # notify user
-                    cur2 = conn.cursor()
-                    cur2.execute("SELECT chat_id FROM orders WHERE id = ?", (oid,))
-                    rr = cur2.fetchone()
-                    if rr:
-                        try:
-                            bot.send_message(rr["chat_id"], f"✅ Оплата получена за заказ #{oid}. Спасибо.")
-                        except:
-                            pass
-                elif r["cart_id"]:
-                    cart_id = int(r["cart_id"])
-                    # mark cart paid and create orders from items
-                    cur.execute("SELECT * FROM cart_items WHERE cart_id = ?", (cart_id,))
-                    items = [dict(x) for x in cur.fetchall()]
-                    # for each item create an order with status paid
-                    for it in items:
-                        create_order_from_cart_item(r["chat_id"], it, status="оплачен")
-                    mark_cart_paid(cart_id)
-                    conn.commit()
-                    # notify user
-                    try:
-                        bot.send_message(r["chat_id"], f"✅ Оплата получена за корзину #{cart_id}. Заказы созданы.")
-                    except:
-                        pass
-            except Exception:
-                traceback.print_exc()
+            if r["order_id"]:
+                cur.execute("UPDATE orders SET status = ? WHERE id = ?", ("оплачен", r["order_id"]))
+                conn.commit()
+                try:
+                    bot.send_message(r["chat_id"], f"✅ Оплата получена за заказ #{r['order_id']}. Спасибо!")
+                except:
+                    pass
+            elif r["cart_id"]:
+                cart_id = int(r["cart_id"])
+                cur.execute("SELECT * FROM cart_items WHERE cart_id = ?", (cart_id,))
+                items = [dict(x) for x in cur.fetchall()]
+                for it in items:
+                    create_order_from_cart_item(r["chat_id"], it, status="оплачен")
+                mark_cart_paid(cart_id)
+                conn.commit()
+                try:
+                    bot.send_message(r["chat_id"], f"✅ Оплата получена за корзину #{cart_id}. Заказы созданы.")
+                except:
+                    pass
         conn.close()
     return jsonify({"ok": True}), 200
 
-# telegram webhook endpoint (optional)
 @app.route("/" + BOT_TOKEN, methods=["POST"])
 def telegram_webhook():
     json_str = request.get_data().decode("utf-8")
-    try:
-        update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])
-    except Exception as e:
-        print("Webhook error:", e)
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
     return "OK", 200
 
 @app.route("/", methods=["GET"])
@@ -1046,148 +863,10 @@ def index():
     return "Bot OK", 200
 
 # -------------------------
-# Webhook setter
-# -------------------------
-def set_telegram_webhook():
-    if not USE_WEBHOOK:
-        print("USE_WEBHOOK not set; skipping webhook")
-        return
-    if not WEB_DOMAIN:
-        print("WEB_DOMAIN empty; cannot set webhook")
-        return
-    webhook_url = WEB_DOMAIN.rstrip("/") + "/" + BOT_TOKEN
-    try:
-        bot.remove_webhook(); time.sleep(0.5)
-        res = bot.set_webhook(url=webhook_url)
-        print("Webhook set:", webhook_url, "result:", res)
-    except Exception as e:
-        print("Failed set webhook:", e)
-
-# -------------------------
 # Startup
 # -------------------------
 if __name__ == "__main__":
-    print("Starting SaleTest full service")
-    init_db()
-    if USE_WEBHOOK:
-        set_telegram_webhook()
-        port = int(os.environ.get("PORT", 5000))
-        print("Running Flask (webhook mode) on port", port)
-        app.run(host="0.0.0.0", port=port)
-    else:
-        # run flask + polling
-        t = Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True)
-        t.start()
-        print("Running polling (local)...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=20)
-
-# -------------------------
-# Diagnostics / Maintenance / Utilities
-# -------------------------
-
-@app.route("/diag", methods=["GET"])
-def diag_info():
-    try:
-        info = {
-            "bot_username": bot.get_me().username if bot.get_me() else None,
-            "db_file_exists": os.path.exists(DB_FILE),
-            "file_size_bytes": os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0,
-            "active_threads": len(os.listdir("/proc/self/task")) if os.path.exists("/proc/self/task") else "n/a",
-            "time": datetime.utcnow().isoformat(),
-        }
-    except Exception as e:
-        info = {"error": str(e)}
-    return jsonify(info)
-
-def backup_db():
-    try:
-        if not os.path.exists(DB_FILE):
-            return
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{DB_FILE}.{ts}.bak"
-        with open(DB_FILE, "rb") as fsrc, open(backup_name, "wb") as fdst:
-            fdst.write(fsrc.read())
-        print(f"[Backup] Database backed up to {backup_name}")
-    except Exception as e:
-        print("[Backup] Error:", e)
-
-def periodic_backup(interval_sec=3600):
-    while True:
-        time.sleep(interval_sec)
-        backup_db()
-
-# -------------------------
-# Health / restart helpers
-# -------------------------
-@app.route("/health", methods=["GET"])
-def health_check():
-    return jsonify({"ok": True, "time": datetime.utcnow().isoformat()}), 200
-
-def restart_bot():
-    print("[Restart] Restarting bot process...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-# -------------------------
-# Database dump (for admin only)
-# -------------------------
-@bot.message_handler(commands=['dbdump'])
-def dump_db(m):
-    if m.from_user.id not in ADMIN_IDS:
-        bot.reply_to(m, "Нет доступа.")
-        return
-    try:
-        with open(DB_FILE, "rb") as f:
-            bot.send_document(m.chat.id, f)
-    except Exception as e:
-        bot.reply_to(m, f"Ошибка при выгрузке БД: {e}")
-
-# -------------------------
-# DB auto-backup thread
-# -------------------------
-Thread(target=periodic_backup, daemon=True).start()
-
-# -------------------------
-# Admin broadcast utility
-# -------------------------
-@bot.message_handler(commands=['broadcast'])
-def admin_broadcast(m):
-    if m.from_user.id not in ADMIN_IDS:
-        bot.reply_to(m, "Нет доступа.")
-        return
-    text = m.text.partition(' ')[2].strip()
-    if not text:
-        bot.reply_to(m, "Использование: /broadcast <текст>")
-        return
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT chat_id FROM users")
-    users = [r["chat_id"] for r in cur.fetchall()]
-    conn.close()
-    count = 0
-    for uid in users:
-        try:
-            bot.send_message(uid, text)
-            count += 1
-            time.sleep(0.05)
-        except:
-            continue
-    bot.reply_to(m, f"✅ Рассылка завершена, доставлено: {count}/{len(users)}")
-
-# -------------------------
-# Safety net for crash recovery
-# -------------------------
-def safe_polling():
-    while True:
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=25)
-        except Exception as e:
-            print("[Polling crash]", e)
-            time.sleep(5)
-
-# -------------------------
-# Final startup (redundant for safety)
-# -------------------------
-if __name__ == "__main__":
-    print("✅ SaleTest_full ready — running main loop...")
+    print("🚀 Starting SaleTest full bot")
     init_db()
     if USE_WEBHOOK:
         set_telegram_webhook()
@@ -1195,5 +874,4 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port)
     else:
         Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True).start()
-        Thread(target=periodic_backup, daemon=True).start()
-        safe_polling()
+        bot.infinity_polling(timeout=60, long_polling_timeout=20)
