@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 SaleTest_full.py
-Полный рабочий Telegram-бот — магазин + корзина + CryptoBot + операторы + поддержка.
-Валюты: USDT, TON, TRX
-Хранение: SQLite
+Полный Telegram-бот: магазин + корзина + CryptoBot (USDT/TON/TRX) + операторы + поддержка.
+SQLite хранение всех данных (корзина, операторы, заказы, привязка invoice -> заказ(ы)).
 """
 
 import os
@@ -24,72 +23,82 @@ import telebot
 from telebot import types
 
 # -------------------------
-# CONFIG — настрой перед запуском или задавай через ENV
+# CONFIG (можно переопределять через ENV)
 # -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8587164094:AAEcsW0oUMg1Hphbymdg3NHtH_Q25j7RyWo"
 CRYPTOPAY_API_TOKEN = os.environ.get("CRYPTOPAY_API_TOKEN") or "484313:AA6FJU50A2cMhJas5ruR6PD15Jl5F1XMrN7"
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "https://render-jj8d.onrender.com"
 USE_WEBHOOK = os.environ.get("USE_WEBHOOK", "0") == "1"
 ADMIN_IDS = set([int(os.environ.get("ADMIN_ID") or 1942740947)])
-INITIAL_OPERATORS = [7771789412]  # добавь сюда операторов, которые сразу есть
+INITIAL_OPERATORS = [7771789412]  # initial operator(s)
 
 CRYPTO_API_BASE = "https://pay.crypt.bot/api"
 
-DB_FILE = os.environ.get("DB_FILE") or "salebot_full.sqlite"
-IPN_LOG_FILE = os.environ.get("IPN_LOG_FILE") or "ipn_log.jsonl"
+DB_FILE = os.environ.get("DB_FILE") or "salebot.sqlite"
+IPN_LOG_FILE = "ipn_log.jsonl"
 
-# Валюты, которые мы поддерживаем для оплаты
+# Allowed assets only (per request)
 AVAILABLE_ASSETS = ["USDT", "TON", "TRX"]
 
-# Соцсети и доступные услуги — ПРАЙС: ты говорил, что у тебя уже готовый прайс.
-# Здесь шаблон: 'social' -> { 'service_key': { 'title': str, 'min': int, 'unit': int, 'price_usd_per_unit': float } }
-# price_usd_per_unit — цена за единицу в USD. (ты говорил, уже перемножил — просто вставь свои значения)
-SERVICES = {
+# Social networks and available services (prices in USD).
+# You said you pre-multiplied/adjusted — сюда можно подставить твой итоговый прайс.
+# Сейчас это демонстрационный прайс (пример). Изменяй как нужно.
+SERVICES_BY_SOCIAL = {
     "Instagram": {
-        "sub": {"title": "Подписчики", "min": 10, "unit": 1, "price_usd_per_unit": 0.01},
-        "view": {"title": "Просмотры", "min": 1000, "unit": 1000, "price_usd_per_unit": 5.0},  # пример: $5 за 1000
-        "com": {"title": "Комментарии", "min": 10, "unit": 1, "price_usd_per_unit": 0.02},
-        "like": {"title": "Лайки/Реакции", "min": 10, "unit": 1, "price_usd_per_unit": 0.01},
+        "sub": {"label": "Подписчики", "price_usd": 5.0},
+        "view": {"label": "Просмотры", "price_usd": 1.0},
+        "com": {"label": "Комментарии", "price_usd": 7.0},
+        "react": {"label": "Реакции", "price_usd": 0.6},
     },
     "TikTok": {
-        "sub": {"title": "Подписчики", "min": 10, "unit": 1, "price_usd_per_unit": 0.015},
-        "view": {"title": "Просмотры", "min": 1000, "unit": 1000, "price_usd_per_unit": 6.0},
-        "like": {"title": "Лайки", "min": 10, "unit": 1, "price_usd_per_unit": 0.02},
+        "sub": {"label": "Подписчики", "price_usd": 4.0},
+        "view": {"label": "Просмотры", "price_usd": 0.6},
+        "com": {"label": "Комментарии", "price_usd": 6.0},
+        "react": {"label": "Реакции", "price_usd": 0.5},
     },
     "YouTube": {
-        "sub": {"title": "Подписчики", "min": 10, "unit": 1, "price_usd_per_unit": 0.05},
-        "view": {"title": "Просмотры", "min": 1000, "unit": 1000, "price_usd_per_unit": 3.0},
-        "com": {"title": "Комментарии", "min": 5, "unit": 1, "price_usd_per_unit": 0.2},
+        "sub": {"label": "Подписчики", "price_usd": 6.0},
+        "view": {"label": "Просмотры", "price_usd": 1.2},
+        "com": {"label": "Комментарии", "price_usd": 8.0},
+        "react": {"label": "Реакции", "price_usd": 0.8},
     },
     "Telegram": {
-        "sub": {"title": "Подписчики (канал)", "min": 10, "unit": 1, "price_usd_per_unit": 0.02},
-        "view": {"title": "Просмотры", "min": 10, "unit": 1, "price_usd_per_unit": 0.01},
+        "sub": {"label": "Подписчики (члены)", "price_usd": 3.0},
+        "view": {"label": "Просмотры (репосты)", "price_usd": 0.8},
+        "com": {"label": "Комментарии (в чатах)", "price_usd": 5.0},
     },
     "Facebook": {
-        "sub": {"title": "Подписчики", "min": 10, "unit": 1, "price_usd_per_unit": 0.03},
-        "like": {"title": "Реакции", "min": 10, "unit": 1, "price_usd_per_unit": 0.02},
+        "sub": {"label": "Подписчики", "price_usd": 4.5},
+        "view": {"label": "Просмотры", "price_usd": 1.0},
+        "com": {"label": "Комментарии", "price_usd": 6.5},
+        "react": {"label": "Реакции", "price_usd": 0.7},
     },
-    "X": {  # Twitter/X
-        "sub": {"title": "Подписчики", "min": 10, "unit": 1, "price_usd_per_unit": 0.02},
-        "retweet": {"title": "Ретвиты/репосты", "min": 5, "unit": 1, "price_usd_per_unit": 0.1},
+    "Twitter/X": {
+        "sub": {"label": "Подписчики", "price_usd": 3.5},
+        "view": {"label": "Просмотры", "price_usd": 0.7},
+        "com": {"label": "Комментарии", "price_usd": 5.5},
+        "react": {"label": "Реакции", "price_usd": 0.4},
     }
 }
 
-# Текстовые отображения
-PRETTY_SOCIALS = list(SERVICES.keys())
+# Pretty names
+PRETTY_SOCIAL = {
+    "Instagram": "Instagram",
+    "TikTok": "TikTok",
+    "YouTube": "YouTube",
+    "Telegram": "Telegram",
+    "Facebook": "Facebook",
+    "Twitter/X": "Twitter/X",
+}
 
 # -------------------------
-# sanity check
+# Sanity
 # -------------------------
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
-    raise ValueError("BOT_TOKEN must be set and contain a colon (:)")
-
-if not CRYPTOPAY_API_TOKEN or ":" not in CRYPTOPAY_API_TOKEN:
-    # CryptoBot token may also contain colon pattern like "<botid>:<token>", but some tokens may be simple. We'll warn only.
-    pass
+    raise ValueError("BOT_TOKEN must be set and contain ':'")
 
 # -------------------------
-# Init bot + flask
+# Init bot & flask
 # -------------------------
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 app = Flask(__name__)
@@ -114,51 +123,42 @@ def init_db():
         last_name TEXT,
         created_at TEXT
     )""")
-    # orders — finished individual orders (single-item) and also used for paid items
+    # orders (finalized or awaiting payment)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER,
         social TEXT,
-        service_key TEXT,
+        service TEXT,
         amount INTEGER,
         price_usd REAL,
-        link TEXT,
+        currency TEXT,
         status TEXT,
         invoice_id TEXT,
         pay_url TEXT,
-        created_at TEXT,
-        updated_at TEXT
-    )""")
-    # carts — one cart per user (open)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS carts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER,
-        status TEXT, -- open, paid, cancelled
-        created_at TEXT,
-        updated_at TEXT
-    )""")
-    # cart items
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS cart_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        cart_id INTEGER,
-        social TEXT,
-        service_key TEXT,
-        amount INTEGER,
-        price_usd REAL,
         link TEXT,
-        created_at TEXT
+        created_at TEXT,
+        updated_at TEXT
     )""")
-    # invoices_map
+    # invoices mapping (invoice -> list of order ids as JSON)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS invoices_map (
         invoice_id TEXT PRIMARY KEY,
         chat_id INTEGER,
-        order_id INTEGER,
-        cart_id INTEGER,
+        order_ids TEXT,
         raw_payload TEXT,
+        created_at TEXT
+    )""")
+    # cart (temporary / persistent)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS cart (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        social TEXT,
+        service TEXT,
+        amount INTEGER,
+        price_usd REAL,
+        link TEXT,
         created_at TEXT
     )""")
     # operators
@@ -189,7 +189,6 @@ def init_db():
         text TEXT,
         created_at TEXT
     )""")
-    # operator notifications (store last message id so we can edit)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS operator_notifications (
         operator_chat INTEGER PRIMARY KEY,
@@ -217,96 +216,13 @@ def ensure_user(chat_id: int, message: Optional[telebot.types.Message] = None):
         conn.commit()
     conn.close()
 
-def get_or_create_cart(chat_id:int) -> int:
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT id FROM carts WHERE chat_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", (chat_id,))
-    r = cur.fetchone()
-    if r:
-        cid = r["id"]
-    else:
-        now = datetime.utcnow().isoformat()
-        cur.execute("INSERT INTO carts (chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)", (chat_id, "open", now, now))
-        cid = cur.lastrowid
-        conn.commit()
-    conn.close()
-    return cid
-
-def add_item_to_cart(cart_id:int, social:str, service_key:str, amount:int, link:str, price_usd:float):
-    now = datetime.utcnow().isoformat()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("INSERT INTO cart_items (cart_id, social, service_key, amount, price_usd, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (cart_id, social, service_key, amount, price_usd, link, now))
-    cur.execute("UPDATE carts SET updated_at = ? WHERE id = ?", (now, cart_id))
-    conn.commit(); conn.close()
-
-def get_cart_items(cart_id:int):
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM cart_items WHERE cart_id = ?", (cart_id,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close(); return rows
-
-def remove_cart_item(item_id:int):
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("DELETE FROM cart_items WHERE id = ?", (item_id,))
-    conn.commit(); conn.close()
-
-def clear_cart(cart_id:int):
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("DELETE FROM cart_items WHERE cart_id = ?", (cart_id,))
-    cur.execute("UPDATE carts SET status = ?, updated_at = ? WHERE id = ?", ("cancelled", datetime.utcnow().isoformat(), cart_id))
-    conn.commit(); conn.close()
-
-def mark_cart_paid(cart_id:int):
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("UPDATE carts SET status = ?, updated_at = ? WHERE id = ?", ("paid", datetime.utcnow().isoformat(), cart_id))
-    conn.commit(); conn.close()
-
-def create_order_from_cart_item(chat_id:int, cart_item:dict, status="awaiting_payment"):
-    now = datetime.utcnow().isoformat()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""INSERT INTO orders (chat_id, social, service_key, amount, price_usd, link, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chat_id, cart_item["social"], cart_item["service_key"], cart_item["amount"], cart_item["price_usd"],
-                 cart_item["link"], status, now, now))
-    oid = cur.lastrowid
-    conn.commit(); conn.close()
-    return oid
-
-def create_single_order(chat_id:int, social:str, service_key:str, amount:int, price_usd:float, link:str, status="awaiting_payment"):
-    now = datetime.utcnow().isoformat()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""INSERT INTO orders (chat_id, social, service_key, amount, price_usd, link, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chat_id, social, service_key, amount, price_usd, link, status, now, now))
-    oid = cur.lastrowid
-    conn.commit(); conn.close()
-    return oid
-
-def update_order_invoice(order_id:int, invoice_id:Optional[str], pay_url:Optional[str]):
-    now = datetime.utcnow().isoformat()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("UPDATE orders SET invoice_id = ?, pay_url = ?, updated_at = ? WHERE id = ?", (invoice_id, pay_url, now, order_id))
-    conn.commit(); conn.close()
-
-def set_invoice_mapping(invoice_id:str, chat_id:int, order_id:Optional[int]=None, cart_id:Optional[int]=None, raw_payload:Optional[Any]=None):
-    now = datetime.utcnow().isoformat()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO invoices_map (invoice_id, chat_id, order_id, cart_id, raw_payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (invoice_id, chat_id, order_id, cart_id, json.dumps(raw_payload, ensure_ascii=False) if raw_payload else None, now))
-    conn.commit(); conn.close()
-
-def list_operators():
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM operators ORDER BY id")
-    rows = [dict(r) for r in cur.fetchall()]; conn.close(); return rows
-
 def add_operator(chat_id:int, username:Optional[str]=None, display_name:Optional[str]=None):
     conn = get_db(); cur = conn.cursor()
     now = datetime.utcnow().isoformat()
     cur.execute("INSERT OR IGNORE INTO operators (chat_id, username, display_name, created_at) VALUES (?, ?, ?, ?)",
                 (chat_id, username, display_name, now))
     conn.commit(); conn.close()
-    # ensure notification entry
+    # ensure notification row exists
     conn = get_db(); cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO operator_notifications (operator_chat, message_id, created_at) VALUES (?, ?, ?)",
                 (chat_id, None, now))
@@ -318,13 +234,75 @@ def remove_operator(chat_id:int):
     cur.execute("DELETE FROM operator_notifications WHERE operator_chat = ?", (chat_id,))
     conn.commit(); conn.close()
 
+def list_operators():
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM operators ORDER BY id")
+    rows = [dict(r) for r in cur.fetchall()]; conn.close(); return rows
+
+def add_to_cart(chat_id:int, social:str, service:str, amount:int, price_usd:float, link:str):
+    now = datetime.utcnow().isoformat()
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("INSERT INTO cart (chat_id, social, service, amount, price_usd, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, social, service, amount, price_usd, link, now))
+    conn.commit(); oid = cur.lastrowid; conn.close(); return oid
+
+def get_cart(chat_id:int):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM cart WHERE chat_id = ? ORDER BY id", (chat_id,))
+    rows = [dict(r) for r in cur.fetchall()]; conn.close(); return rows
+
+def remove_cart_item(cart_id:int, chat_id:int):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM cart WHERE id = ? AND chat_id = ?", (cart_id, chat_id))
+    conn.commit(); conn.close()
+
+def clear_cart(chat_id:int):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM cart WHERE chat_id = ?", (chat_id,))
+    conn.commit(); conn.close()
+
+def create_order_record(chat_id:int, social:str, service:str, amount:int, price_usd:float, currency:str="USD", link:Optional[str]=None, status:str="awaiting_payment"):
+    now = datetime.utcnow().isoformat()
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("""INSERT INTO orders (chat_id, social, service, amount, price_usd, currency, status, invoice_id, pay_url, link, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chat_id, social, service, amount, price_usd, currency, status, None, None, link, now, now))
+    oid = cur.lastrowid; conn.commit(); conn.close(); return oid
+
+def update_order_invoice(order_id:int, invoice_id:Optional[str], pay_url:Optional[str]):
+    now = datetime.utcnow().isoformat()
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("UPDATE orders SET invoice_id = ?, pay_url = ?, updated_at = ? WHERE id = ?", (invoice_id, pay_url, now, order_id))
+    conn.commit(); conn.close()
+
+def set_invoice_mapping(invoice_id:str, chat_id:int, order_ids:List[int], raw_payload:Optional[Any]=None):
+    now = datetime.utcnow().isoformat()
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO invoices_map (invoice_id, chat_id, order_ids, raw_payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                (invoice_id, chat_id, json.dumps(order_ids, ensure_ascii=False), json.dumps(raw_payload, ensure_ascii=False) if raw_payload else None, now))
+    conn.commit(); conn.close()
+
+def get_invoice_mapping(invoice_id:str):
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM invoices_map WHERE invoice_id = ?", (invoice_id,))
+    r = cur.fetchone(); conn.close()
+    return dict(r) if r else None
+
+def mark_orders_paid(order_ids:List[int]):
+    conn = get_db(); cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    for oid in order_ids:
+        cur.execute("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?", ("оплачен", now, oid))
+    conn.commit(); conn.close()
+
+# Support functions (same as before)
 def get_open_requests_count() -> int:
     conn = get_db(); cur = conn.cursor()
     cur.execute("SELECT COUNT(*) as c FROM support_requests WHERE status = 'open'")
     r = cur.fetchone(); conn.close()
     return r["c"] if r else 0
 
-def create_support_request(user_chat:int, username:str, text:str) -> int:
+def create_support_request(user_chat:int, username:str, text:str)->int:
     now = datetime.utcnow().isoformat()
     conn = get_db(); cur = conn.cursor()
     cur.execute("INSERT INTO support_requests (user_chat, username, text, status, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -357,7 +335,7 @@ def add_support_message(req_id:int, from_chat:int, to_chat:int, text:str):
     conn.commit(); conn.close()
 
 # -------------------------
-# CryptoBot helpers
+# CryptoBot API helpers
 # -------------------------
 def create_cryptobot_invoice(amount_value:float, asset:str, payload:str, description:str, callback_url:Optional[str]=None) -> dict:
     url = CRYPTO_API_BASE + "/createInvoice"
@@ -371,7 +349,7 @@ def create_cryptobot_invoice(amount_value:float, asset:str, payload:str, descrip
             j = r.json()
         except Exception:
             return {"error": True, "status_code": r.status_code, "body": r.text}
-        if r.status_code not in (200, 201):
+        if r.status_code not in (200,201):
             return {"error": True, "status_code": r.status_code, "body": j}
         return j
     except Exception as e:
@@ -403,17 +381,11 @@ def convert_price_usd_to_asset(price_usd: float, asset: str) -> float:
         return round(price_usd, 6)
     try:
         if asset == "TON":
-            r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": "toncoin", "vs_currencies": "usd"}, timeout=8)
-            j = r.json()
-            ton_usd = float(j["toncoin"]["usd"])
-            return round(price_usd / ton_usd, 6)
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": "toncoin", "vs_currencies": "usd"}, timeout=8)
+            j = r.json(); ton_usd = float(j["toncoin"]["usd"]); return round(price_usd / ton_usd, 6)
         if asset == "TRX":
-            r = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                             params={"ids": "tron", "vs_currencies": "usd"}, timeout=8)
-            j = r.json()
-            trx_usd = float(j["tron"]["usd"])
-            return round(price_usd / trx_usd, 6)
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": "tron", "vs_currencies": "usd"}, timeout=8)
+            j = r.json(); trx_usd = float(j["tron"]["usd"]); return round(price_usd / trx_usd, 6)
         return round(price_usd, 6)
     except Exception:
         return round(price_usd, 6)
@@ -423,58 +395,54 @@ def convert_price_usd_to_asset(price_usd: float, asset: str) -> float:
 # -------------------------
 def main_menu_markup():
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🛒 Магазин", callback_data="menu_shop"))
-    kb.add(types.InlineKeyboardButton("🧾 Корзина / Профиль", callback_data="profile"))
-    kb.add(types.InlineKeyboardButton("✉️ Поддержка (в боте)", callback_data="support_bot"))
-    kb.add(types.InlineKeyboardButton("📞 Поддержка (личные)", callback_data="support_personal"))
+    kb.add(types.InlineKeyboardButton("🛒 Купить услуги", callback_data="buy_services"))
+    kb.add(types.InlineKeyboardButton("🧾 Корзина", callback_data="view_cart"))
+    kb.add(types.InlineKeyboardButton("📨 Поддержка (в боте)", callback_data="support_bot"))
+    kb.add(types.InlineKeyboardButton("👤 Профиль", callback_data="profile"))
     return kb
 
-def shop_socials_markup():
+def social_menu_markup():
     kb = types.InlineKeyboardMarkup(row_width=2)
-    for s in PRETTY_SOCIALS:
-        kb.add(types.InlineKeyboardButton(s, callback_data=f"shop_social_{s}"))
+    for soc in SERVICES_BY_SOCIAL.keys():
+        kb.add(types.InlineKeyboardButton(PRETTY_SOCIAL.get(soc, soc), callback_data=f"social_{soc}"))
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return kb
 
-def services_markup_for_social(social):
+def services_markup_for_social(social:str):
     kb = types.InlineKeyboardMarkup(row_width=1)
-    services = SERVICES.get(social, {})
-    for key, info in services.items():
-        # show short price example: price per unit (unit explained)
-        unit = info.get("unit",1)
-        price = info.get("price_usd_per_unit", 0.0)
-        if unit > 1:
-            label = f"{info['title']} — ${price} / {unit}"
-        else:
-            label = f"{info['title']} — ${price} / 1"
-        kb.add(types.InlineKeyboardButton(label, callback_data=f"service_{social}_{key}"))
-    kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="shop_socials"))
+    services = SERVICES_BY_SOCIAL.get(social, {})
+    for svc_key, svc in services.items():
+        label = svc.get("label", svc_key)
+        price = svc.get("price_usd", 0.0)
+        kb.add(types.InlineKeyboardButton(f"{label} — ${price}", callback_data=f"svc_{social}_{svc_key}"))
+    kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="buy_services"))
     return kb
 
-def currency_selection_markup_for_order(chat_id:int, order_ref:str):
-    # order_ref for single order: "order_<chatid>_<orderid>"
+def currency_selection_markup_for_order(chat_id:int, order_id:int):
     kb = types.InlineKeyboardMarkup(row_width=3)
     for asset in AVAILABLE_ASSETS:
-        kb.add(types.InlineKeyboardButton(asset, callback_data=f"pay_asset_{order_ref}_{asset}"))
+        kb.add(types.InlineKeyboardButton(asset, callback_data=f"pay_asset_{chat_id}_{order_id}_{asset}"))
     kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_payment"))
     return kb
 
-def currency_selection_markup_for_cart(chat_id:int, cart_id:int):
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for asset in AVAILABLE_ASSETS:
-        kb.add(types.InlineKeyboardButton(asset, callback_data=f"pay_cart_{chat_id}_{cart_id}_{asset}"))
-    kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_payment"))
+def cart_view_markup(chat_id:int):
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    items = get_cart(chat_id)
+    for it in items:
+        kb.add(types.InlineKeyboardButton(f"Удалить #{it['id']} {it['social']} {SERVICES_BY_SOCIAL.get(it['social'], {}).get(it['service'], {}).get('label',it['service'])} x{it['amount']}", callback_data=f"cart_remove_{it['id']}"))
+    if items:
+        kb.add(types.InlineKeyboardButton("Оплатить всё", callback_data=f"cart_pay_{chat_id}"))
+        kb.add(types.InlineKeyboardButton("Очистить корзину", callback_data=f"cart_clear_{chat_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return kb
 
 # -------------------------
-# In-memory states (short-lived)
+# In-memory states
 # -------------------------
-user_state: Dict[int, Dict[str, Any]] = {}   # for awaiting qty/link/support etc.
-operator_state: Dict[int, Dict[str, Any]] = {}
+user_state: Dict[int, Dict[str, Any]] = {}   # for awaiting input flows
+operator_state: Dict[int, Dict[str, Any]] = {}  # operator replies
 
-# -------------------------
 # Ensure initial operators
-# -------------------------
 for op in INITIAL_OPERATORS:
     try:
         add_operator(op)
@@ -493,204 +461,148 @@ def cmd_start(m):
 def cb_all(call):
     try:
         data = call.data
-        uid = call.from_user.id
         cid = call.message.chat.id
 
-        # Main menu
-        if data == "menu_shop":
-            bot.edit_message_text("Выберите соцсеть:", cid, call.message.message_id, reply_markup=shop_socials_markup())
+        # main flow
+        if data == "buy_services":
+            bot.edit_message_text("Выберите соцсеть:", cid, call.message.message_id, reply_markup=social_menu_markup())
             return
+
         if data == "back_main":
             bot.edit_message_text("Главное меню:", cid, call.message.message_id, reply_markup=main_menu_markup())
             return
 
-        # support personal (just instruction)
-        if data == "support_personal":
-            bot.edit_message_text("📨 Нужна помощь в личных сообщениях? Найдите оператора по его юзернейму или нажмите 'Поддержка (в боте)' чтобы написать через бота.", cid, call.message.message_id)
+        # social chosen
+        if data.startswith("social_"):
+            soc = data.split("_",1)[1]
+            bot.edit_message_text(f"Услуги для {PRETTY_SOCIAL.get(soc,soc)}:", cid, call.message.message_id, reply_markup=services_markup_for_social(soc))
             return
 
-        # support via bot
-        if data == "support_bot":
-            user_state[cid] = {"awaiting_support_msg": True}
-            bot.send_message(cid, "✉️ Напишите ваше сообщение для поддержки. Оно будет отправлено операторам.")
-            return
-
-        # shop social selected
-        if data.startswith("shop_social_"):
-            social = data.replace("shop_social_", "", 1)
-            if social not in SERVICES:
-                bot.answer_callback_query(call.id, "Ошибка: неизвестная соцсеть")
-                return
-            bot.edit_message_text(f"Услуги для {social}:", cid, call.message.message_id, reply_markup=services_markup_for_social(social))
-            return
-
-        # service selected (start qty flow)
-        if data.startswith("service_"):
-            # format service_{social}_{key}
-            _, social, key = data.split("_", 2)
-            svc = SERVICES.get(social, {}).get(key)
+        # service selected -> ask amount then link
+        if data.startswith("svc_"):
+            # svc_<social>_<svc_key>
+            _, social, svc_key = data.split("_",2)
+            svc = SERVICES_BY_SOCIAL.get(social, {}).get(svc_key)
             if not svc:
-                bot.answer_callback_query(call.id, "Сервис не найден")
+                bot.answer_callback_query(call.id, "Услуга не найдена")
                 return
-            min_allowed = svc.get("min",1)
-            unit = svc.get("unit",1)
-            price_unit = svc.get("price_usd_per_unit", 0.0)
-            # state: awaiting quantity (user will input number of units/items)
-            user_state[cid] = {"awaiting_qty_for": True, "social": social, "service_key": key,
-                               "min": min_allowed, "unit": unit, "price_unit": price_unit}
-            bot.send_message(cid, f"Вы выбрали: {svc['title']} для {social}.\nМинимум: {min_allowed}. Введите количество (целое число):")
+            # ask amount
+            user_state[cid] = {"awaiting_amount_for": {"social": social, "service": svc_key}}
+            bot.send_message(cid, f"Вы выбрали {PRETTY_SOCIAL.get(social,social)} - {svc.get('label')}. Введите количество (целое число):")
             bot.answer_callback_query(call.id)
             return
 
-        # profile/cart
-        if data == "profile":
-            # show cart summary + orders
-            cart_id = get_or_create_cart(cid)
-            items = get_cart_items(cart_id)
-            txt = "🧾 Ваша корзина:\n\n"
+        # view cart
+        if data == "view_cart":
+            items = get_cart(cid)
+            if not items:
+                bot.answer_callback_query(call.id, "Корзина пуста")
+                bot.send_message(cid, "Ваша корзина пуста.", reply_markup=main_menu_markup())
+                return
+            # build text
+            text = "🧾 Ваша корзина:\n\n"
             total = 0.0
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            if items:
-                for it in items:
-                    txt += f"#{it['id']} | {it['social']} — {SERVICES[it['social']][it['service_key']]['title']} x{it['amount']} — ${it['price_usd']:.2f}\nLink: {it['link']}\n\n"
-                    kb.add(types.InlineKeyboardButton(f"Удалить #{it['id']}", callback_data=f"cart_remove_{it['id']}"))
-                    total += float(it['price_usd'])
-                txt += f"Итого: ${total:.2f}\n\n"
-                kb.add(types.InlineKeyboardButton("Оплатить корзину", callback_data=f"cart_pay_{cart_id}"))
-                kb.add(types.InlineKeyboardButton("Очистить корзину", callback_data=f"cart_clear_{cart_id}"))
-            else:
-                txt += "Корзина пуста.\n\n"
-            # list user's individual orders
-            conn = get_db(); cur = conn.cursor()
-            cur.execute("SELECT * FROM orders WHERE chat_id = ? ORDER BY id DESC LIMIT 10", (cid,))
-            rows = cur.fetchall(); conn.close()
-            if rows:
-                txt += "\n📋 Последние заказы:\n"
-                for r in rows:
-                    txt += f"#{r['id']} | {r['social']} {SERVICES[r['social']][r['service_key']]['title']} x{r['amount']} — ${r['price_usd']:.2f} — {r['status']}\n"
-            bot.send_message(cid, txt, reply_markup=kb)
-            bot.answer_callback_query(call.id)
+            for it in items:
+                svc_label = SERVICES_BY_SOCIAL.get(it['social'], {}).get(it['service'], {}).get('label', it['service'])
+                text += f"#{it['id']} {it['social']} — {svc_label} x{it['amount']} — ${it['price_usd']:.2f}\nСсылка: {it['link']}\n\n"
+                total += float(it['price_usd'])
+            text += f"Всего: ${total:.2f}\n\nВыберите действие:"
+            bot.edit_message_text(text, cid, call.message.message_id, reply_markup=cart_view_markup(cid))
             return
 
-        # cart remove item
+        # remove cart item
         if data.startswith("cart_remove_"):
             try:
-                item_id = int(data.split("_")[-1])
+                cart_id = int(data.split("_")[-1])
             except:
-                bot.answer_callback_query(call.id, "Ошибка удаления")
+                bot.answer_callback_query(call.id, "Ошибка")
                 return
-            remove_cart_item(item_id)
-            bot.answer_callback_query(call.id, "Удалено")
-            # update message: we'll try to edit to show new cart; if fails, send new message
-            try:
-                bot.edit_message_text("Элемент удалён. Откройте Корзина/Профиль снова.", cid, call.message.message_id)
-            except Exception:
-                pass
+            remove_cart_item(cart_id, cid)
+            bot.answer_callback_query(call.id, "Позиция удалена")
+            # refresh cart view
+            items = get_cart(cid)
+            if not items:
+                bot.send_message(cid, "Корзина пуста.", reply_markup=main_menu_markup())
+            else:
+                text = "🧾 Ваша корзина:\n\n"
+                total = 0.0
+                for it in items:
+                    svc_label = SERVICES_BY_SOCIAL.get(it['social'], {}).get(it['service'], {}).get('label', it['service'])
+                    text += f"#{it['id']} {it['social']} — {svc_label} x{it['amount']} — ${it['price_usd']:.2f}\nСсылка: {it['link']}\n\n"
+                    total += float(it['price_usd'])
+                text += f"Всего: ${total:.2f}\n\nВыберите действие:"
+                try:
+                    bot.edit_message_text(text, cid, call.message.message_id, reply_markup=cart_view_markup(cid))
+                except Exception:
+                    bot.send_message(cid, text, reply_markup=cart_view_markup(cid))
             return
 
-        # cart clear
+        # clear cart
         if data.startswith("cart_clear_"):
-            try:
-                cart_id = int(data.split("_")[-1])
-            except:
-                bot.answer_callback_query(call.id, "Ошибка")
-                return
-            clear_cart(cart_id)
+            clear_cart(cid)
             bot.answer_callback_query(call.id, "Корзина очищена")
-            try:
-                bot.edit_message_text("Корзина очищена. Откройте Корзина/Профиль снова.", cid, call.message.message_id)
-            except Exception:
-                pass
+            bot.send_message(cid, "Корзина очищена.", reply_markup=main_menu_markup())
             return
 
-        # cart pay selected -> show asset options
+        # pay cart
         if data.startswith("cart_pay_"):
-            try:
-                cart_id = int(data.split("_")[-1])
-            except:
-                bot.answer_callback_query(call.id, "Ошибка")
-                return
-            # compute total
-            items = get_cart_items(cart_id)
+            # show asset selection and create interim orders for each cart item
+            items = get_cart(cid)
             if not items:
                 bot.answer_callback_query(call.id, "Корзина пуста")
                 return
-            total = sum(float(it['price_usd']) for it in items)
-            # reply markup: available assets
-            bot.send_message(cid, f"Сумма к оплате: ${total:.2f}. Выберите валюту:", reply_markup=currency_selection_markup_for_cart(cid, cart_id))
+            # create orders (status awaiting_payment) and collect ids
+            order_ids = []
+            total_usd = 0.0
+            for it in items:
+                oid = create_order_record(cid, it['social'], it['service'], it['amount'], float(it['price_usd']), "USD", link=it['link'], status="awaiting_payment")
+                order_ids.append(oid)
+                total_usd += float(it['price_usd'])
+            # clear cart (moved to orders)
+            clear_cart(cid)
+            # create a temporary "cart reference" id: join order ids
+            # offer asset choices to user to pay total_usd
+            kb = types.InlineKeyboardMarkup(row_width=3)
+            for asset in AVAILABLE_ASSETS:
+                kb.add(types.InlineKeyboardButton(asset, callback_data=f"pay_cart_{cid}_{'-'.join(map(str,order_ids))}_{asset}"))
+            kb.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="back_main"))
+            bot.send_message(cid, f"Сумма для оплаты: ${total_usd:.2f}. Выберите валюту:", reply_markup=kb)
             bot.answer_callback_query(call.id)
             return
 
-        # pay cart in asset
-        if data.startswith("pay_cart_"):
-            # format pay_cart_<chatid>_<cartid>_<asset>
-            parts = data.split("_", 3)
-            if len(parts) != 4:
-                bot.answer_callback_query(call.id, "Неверные данные оплаты"); return
-            _, chat_str, cartid_str, asset = parts
-            if not chat_str.isdigit() or not cartid_str.isdigit():
-                bot.answer_callback_query(call.id, "Неправильные идентификаторы"); return
-            order_chat = int(chat_str); cart_id = int(cartid_str)
-            items = get_cart_items(cart_id)
-            if not items:
-                bot.answer_callback_query(call.id, "Корзина пуста"); return
-            total_usd = sum(float(it['price_usd']) for it in items)
-            # convert to asset
-            pay_amount = convert_price_usd_to_asset(total_usd, asset.upper())
-            order_uid = f"cart_{order_chat}_{cart_id}_{int(time.time())}"
-            description = f"Оплата корзины #{cart_id} пользователем {order_chat}"
-            callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
-            resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
-            if isinstance(resp, dict) and resp.get("error"):
-                bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
-                bot.answer_callback_query(call.id, "Ошибка")
+        # pay single order (asset button) - format pay_asset_<chat>_<order>_<asset>
+        if data.startswith("pay_asset_"):
+            bot.answer_callback_query(call.id)
+            payload = data.replace("pay_asset_", "", 1)
+            parts = payload.split("_")
+            if len(parts) < 3:
+                bot.send_message(cid, "Ошибка: недостаточно данных для оплаты.")
                 return
-            invoice_id = resp.get("invoiceId") or resp.get("id")
-            pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result",{}).get("pay_url") if isinstance(resp, dict) else None)
-            # map invoice -> cart
-            if invoice_id:
-                set_invoice_mapping(str(invoice_id), order_chat, order_id=None, cart_id=cart_id, raw_payload=resp)
-            # send QR or link
-            if pay_url:
-                try:
-                    qr = generate_qr_bytes(pay_url)
-                    bot.send_photo(order_chat, qr, caption=f"💳 Оплата корзины #{cart_id} через {asset.upper()}\nСсылка: {pay_url}")
-                except Exception:
-                    bot.send_message(order_chat, f"💳 Оплата корзины: {pay_url}")
-            else:
-                bot.send_message(order_chat, "Не удалось получить ссылку на оплату.")
-            bot.answer_callback_query(call.id, "Счёт создан, проверьте сообщения")
-            return
-
-        # pay single order: format pay_asset_order_<chatid>_<orderid>_<asset>
-        if data.startswith("pay_asset_order_"):
-            # format pay_asset_order_<chatid>_<orderid>_<asset>
             try:
-                _, _, chat_str, orderid_str, asset = data.split("_", 4)
+                order_chat = int(parts[0]); order_id = int(parts[1]); asset = parts[2]
             except:
-                bot.answer_callback_query(call.id, "Неверный формат"); return
-            if not chat_str.isdigit() or not orderid_str.isdigit():
-                bot.answer_callback_query(call.id, "Неверный формат"); return
-            order_chat = int(chat_str); order_id = int(orderid_str)
+                bot.send_message(cid, "Ошибка: неверные данные заказа.")
+                return
+            # load order
             conn = get_db(); cur = conn.cursor()
             cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-            r = cur.fetchone(); conn.close()
-            if not r:
-                bot.answer_callback_query(call.id, "Заказ не найден"); return
-            total_usd = float(r["price_usd"])
-            pay_amount = convert_price_usd_to_asset(total_usd, asset.upper())
-            order_uid = f"order_{order_chat}_{order_id}_{int(time.time())}"
+            row = cur.fetchone(); conn.close()
+            if not row:
+                bot.send_message(cid, "Заказ не найден.")
+                return
+            price_usd = float(row["price_usd"])
+            pay_amount = convert_price_usd_to_asset(price_usd, asset.upper())
+            order_uid = f"order_{order_chat}_{order_id}"
             description = f"Оплата заказа #{order_id}"
             callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
             resp = create_cryptobot_invoice(pay_amount, asset.upper(), order_uid, description, callback_url=callback_url)
             if isinstance(resp, dict) and resp.get("error"):
-                bot.send_message(order_chat, f"Ошибка при создании чека: {resp}")
-                bot.answer_callback_query(call.id, "Ошибка")
+                bot.send_message(order_chat, f"Ошибка создания счета: {resp}")
                 return
-            invoice_id = resp.get("invoiceId") or resp.get("id")
+            invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or resp.get("id")
             pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result",{}).get("pay_url") if isinstance(resp, dict) else None)
             if invoice_id:
-                set_invoice_mapping(str(invoice_id), order_chat, order_id=order_id, cart_id=None, raw_payload=resp)
+                set_invoice_mapping(str(invoice_id), order_chat, [order_id], raw_payload=resp)
                 update_order_invoice(order_id, str(invoice_id), pay_url)
             if pay_url:
                 try:
@@ -699,78 +611,108 @@ def cb_all(call):
                 except Exception:
                     bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
             else:
-                bot.send_message(order_chat, "Не удалось получить ссылку на оплату.")
+                bot.send_message(order_chat, "Не удалось получить ссылку на оплату. Обратитесь в поддержку.")
+            return
+
+        # pay cart callback: pay_cart_<chat>_<orderids joined by -> e.g. 12-13-14>_<asset>
+        if data.startswith("pay_cart_"):
             bot.answer_callback_query(call.id)
-            return
-
-        # cancel payment
-        if data == "cancel_payment":
-            bot.answer_callback_query(call.id, "Оплата отменена")
             try:
-                bot.send_message(cid, "Оплата отменена.", reply_markup=main_menu_markup())
-            except:
-                pass
-            return
-
-        # noop (navigation placeholder)
-        if data == "noop":
-            bot.answer_callback_query(call.id)
-            return
-
-        # open support request list (for operators)
-        if data.startswith("open_requests_page_"):
-            try:
-                page = int(data.split("_")[-1])
-            except:
-                page = 1
-            show_requests_page(call.from_user.id, page, call.message)
-            bot.answer_callback_query(call.id)
-            return
-
-        # open request
-        if data.startswith("req_"):
-            try:
-                req_id = int(data.split("_")[1])
-            except:
-                bot.answer_callback_query(call.id, "Bad request id"); return
-            req = get_request_by_id(req_id)
-            if not req or req["status"] != "open":
-                bot.answer_callback_query(call.id, "Обращение не найдено или закрыто"); return
-            text = f"📨 Обращение #{req['id']}\nОт: {req['username']} (id {req['user_chat']})\n\n{req['text']}\n\nНажмите Ответить, чтобы отправить ответ и закрыть обращение."
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            kb.add(types.InlineKeyboardButton("Ответить", callback_data=f"reply_req_{req['id']}"))
-            kb.add(types.InlineKeyboardButton("Назад к списку", callback_data="open_requests_page_1"))
-            try:
-                bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+                _, rest = data.split("pay_cart_",1)
+                parts = rest.split("_")
+                chat_str = parts[0]
+                orderids_part = parts[1]
+                asset = parts[2]
             except Exception:
-                bot.send_message(call.message.chat.id, text, reply_markup=kb)
-            bot.answer_callback_query(call.id)
-            return
-
-        # reply to request
-        if data.startswith("reply_req_"):
+                bot.send_message(cid, "Ошибка оплаты корзины.")
+                return
             try:
-                req_id = int(data.split("_")[-1])
+                order_chat = int(chat_str)
             except:
-                bot.answer_callback_query(call.id, "Bad conv id"); return
-            # only operators allowed
-            if call.from_user.id not in [o["chat_id"] for o in list_operators()]:
-                bot.answer_callback_query(call.id, "У вас нет прав оператора"); return
-            operator_state[call.from_user.id] = {"awaiting_reply_for": req_id, "message_id": call.message.message_id}
-            bot.send_message(call.from_user.id, "Введите ответ для пользователя (сообщение будет отправлено и обращение закроется):")
-            bot.answer_callback_query(call.id)
+                bot.send_message(cid, "Ошибка: некорректный chat id."); return
+            order_ids = []
+            for s in orderids_part.split("-"):
+                try:
+                    order_ids.append(int(s))
+                except:
+                    pass
+            if not order_ids:
+                bot.send_message(cid, "Нет заказов для оплаты"); return
+            # compute total USD
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("SELECT id, price_usd FROM orders WHERE id IN ({seq})".format(seq=",".join("?"*len(order_ids))), order_ids)
+            rows = cur.fetchall(); conn.close()
+            if not rows:
+                bot.send_message(cid, "Заказы не найдены"); return
+            total_usd = sum(float(r["price_usd"]) for r in rows)
+            pay_amount = convert_price_usd_to_asset(total_usd, asset.upper())
+            # create single invoice with payload referencing multiple orders: payload "cart_{chat}_{ts}"
+            ts = int(time.time())
+            payload = f"cart_{order_chat}_{ts}"
+            description = f"Оплата корзины {order_chat} ({len(order_ids)} поз.)"
+            callback_url = WEB_DOMAIN.rstrip("/") + "/cryptobot/ipn"
+            resp = create_cryptobot_invoice(pay_amount, asset.upper(), payload, description, callback_url=callback_url)
+            if isinstance(resp, dict) and resp.get("error"):
+                bot.send_message(order_chat, f"Ошибка создания счета: {resp}"); return
+            invoice_id = resp.get("invoiceId") or resp.get("invoice_id") or resp.get("id")
+            pay_url = resp.get("pay_url") or resp.get("payment_url") or (resp.get("result",{}).get("pay_url") if isinstance(resp, dict) else None)
+            if invoice_id:
+                set_invoice_mapping(str(invoice_id), order_chat, order_ids, raw_payload=resp)
+                # update each order
+                for oid in order_ids:
+                    update_order_invoice(oid, str(invoice_id), pay_url)
+            if pay_url:
+                try:
+                    qr = generate_qr_bytes(pay_url); bot.send_photo(order_chat, qr, caption=f"💳 Оплата корзины через {asset}\nСсылка: {pay_url}")
+                except:
+                    bot.send_message(order_chat, f"💳 Оплата: {pay_url}")
+            else:
+                bot.send_message(order_chat, "Не удалось получить ссылку на оплату.")
             return
 
+        # profile: show orders + cart link
+        if data == "profile":
+            # show cart summary + orders
+            items = get_cart(cid)
+            txt = "👤 Профиль\n\n"
+            if items:
+                txt += "🧾 В корзине:\n"
+                for it in items:
+                    lbl = SERVICES_BY_SOCIAL.get(it['social'], {}).get(it['service'], {}).get('label', it['service'])
+                    txt += f"- #{it['id']} {it['social']} {lbl} x{it['amount']} — ${it['price_usd']:.2f}\n"
+            else:
+                txt += "Корзина пуста.\n"
+            # also show recent orders
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("SELECT * FROM orders WHERE chat_id = ? ORDER BY id DESC LIMIT 10", (cid,))
+            rows = cur.fetchall(); conn.close()
+            if rows:
+                txt += "\n📦 Последние заказы:\n"
+                for r in rows:
+                    txt += f"#{r['id']} {r['social']} {SERVICES_BY_SOCIAL.get(r['social'],{}).get(r['service'],{}).get('label', r['service'])} x{r['amount']} — ${r['price_usd']:.2f} — {r['status']}\n"
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton("Перейти в корзину", callback_data="view_cart"))
+            kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
+            bot.send_message(cid, txt, reply_markup=kb)
+            return
+
+        # support via bot
+        if data == "support_bot":
+            user_state[cid] = {"awaiting_support_msg": True}
+            bot.send_message(cid, "✉️ Напишите ваше сообщение для поддержки. Оно будет отправлено операторам.")
+            return
+
+        # default
         bot.answer_callback_query(call.id, "Неизвестная команда.")
     except Exception:
         traceback.print_exc()
         try:
-            bot.answer_callback_query(call.id, "Ошибка обработки")
+            bot.answer_callback_query(call.id, "Ошибка")
         except:
             pass
 
 # -------------------------
-# Support notifications / listing
+# Notifications for operators
 # -------------------------
 def _store_operator_notification(op_chat:int, msg_id:Optional[int]):
     conn = get_db(); cur = conn.cursor()
@@ -788,18 +730,15 @@ def notify_all_operators_new_request():
         cur.execute("SELECT message_id FROM operator_notifications WHERE operator_chat = ?", (op_chat,))
         r = cur.fetchone(); conn.close()
         notif_text = f"🔔 У вас новое обращение ({total} всего)"
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("Перейти к обращениям", callback_data=f"open_requests_page_1"))
+        kb = types.InlineKeyboardMarkup(); kb.add(types.InlineKeyboardButton("Перейти к обращениям", callback_data=f"open_requests_page_1"))
         try:
             if r and r["message_id"]:
                 try:
                     bot.edit_message_text(notif_text, op_chat, r["message_id"], reply_markup=kb)
                 except Exception:
-                    sent = bot.send_message(op_chat, notif_text, reply_markup=kb)
-                    _store_operator_notification(op_chat, sent.message_id)
+                    sent = bot.send_message(op_chat, notif_text, reply_markup=kb); _store_operator_notification(op_chat, sent.message_id)
             else:
-                sent = bot.send_message(op_chat, notif_text, reply_markup=kb)
-                _store_operator_notification(op_chat, sent.message_id)
+                sent = bot.send_message(op_chat, notif_text, reply_markup=kb); _store_operator_notification(op_chat, sent.message_id)
         except Exception:
             _store_operator_notification(op_chat, None)
 
@@ -808,7 +747,7 @@ def show_requests_page(operator_chat:int, page:int, message_reference=None):
     offset = (page-1) * per_page
     rows = get_open_requests(offset=offset, limit=per_page)
     total = get_open_requests_count()
-    total_pages = (total + per_page - 1) // per_page if total else 1
+    total_pages = (total + per_page - 1)//per_page if total else 1
     txt = f"📂 Обращения — страница {page}/{total_pages}\nВсего открытых: {total}\n\nНажмите на обращение, чтобы открыть его."
     kb = types.InlineKeyboardMarkup(row_width=1)
     for r in rows:
@@ -835,7 +774,7 @@ def show_requests_page(operator_chat:int, page:int, message_reference=None):
             pass
 
 # -------------------------
-# Text handler: quantities, links, support, admin commands
+# Text handler: numbers, link, admin commands, operator replies
 # -------------------------
 @bot.message_handler(content_types=['text'])
 def handle_text(m):
@@ -844,7 +783,7 @@ def handle_text(m):
         text = m.text.strip()
         ensure_user(cid, m)
 
-        # Admin commands
+        # ADMIN commands
         if text.startswith("/add_operator"):
             if m.from_user.id not in ADMIN_IDS:
                 bot.reply_to(m, "Нет прав."); return
@@ -855,8 +794,7 @@ def handle_text(m):
                 new_id = int(parts[1])
             except:
                 bot.reply_to(m, "Bad id"); return
-            add_operator(new_id, username=None, display_name=None)
-            bot.reply_to(m, f"Добавлен оператор {new_id}"); return
+            add_operator(new_id); bot.reply_to(m, f"Добавлен оператор {new_id}"); return
 
         if text.startswith("/operator_remove"):
             if m.from_user.id not in ADMIN_IDS:
@@ -868,8 +806,7 @@ def handle_text(m):
                 rem = int(parts[1])
             except:
                 bot.reply_to(m, "Bad id"); return
-            remove_operator(rem)
-            bot.reply_to(m, f"Удалён оператор {rem}"); return
+            remove_operator(rem); bot.reply_to(m, f"Удалён оператор {rem}"); return
 
         if text.startswith("/operators_check"):
             if m.from_user.id not in ADMIN_IDS:
@@ -886,50 +823,52 @@ def handle_text(m):
             if m.from_user.id not in ADMIN_IDS:
                 bot.reply_to(m, "Нет прав."); return
             conn = get_db(); cur = conn.cursor()
-            cur.execute("SELECT id, chat_id, social, service_key, amount, price_usd, status FROM orders ORDER BY id DESC LIMIT 100")
+            cur.execute("SELECT id, chat_id, social, service, amount, price_usd, status, link FROM orders ORDER BY id DESC LIMIT 100")
             rows = cur.fetchall(); conn.close()
             if not rows:
                 bot.reply_to(m, "Заказов нет."); return
             txt = "Последние заказы:\n\n"
             for r in rows:
-                txt += f"#{r['id']} uid:{r['chat_id']} {r['social']} {SERVICES[r['social']][r['service_key']]['title']} x{r['amount']} — ${r['price_usd']:.2f} — {r['status']}\n"
+                svc_label = SERVICES_BY_SOCIAL.get(r['social'], {}).get(r['service'], {}).get('label', r['service'])
+                txt += f"#{r['id']} uid:{r['chat_id']} {r['social']} {svc_label} x{r['amount']} — ${r['price_usd']:.2f} — {r['status']}\nСсылка: {r['link']}\n\n"
             bot.reply_to(m, txt); return
 
-        # States:
+        # Flow states: awaiting amount for chosen service
         state = user_state.get(cid)
-
-        # awaiting quantity
-        if state and state.get("awaiting_qty_for"):
+        if state and state.get("awaiting_amount_for"):
+            # expecting integer amount
             if not text.isdigit():
                 bot.reply_to(m, "Введите целое число."); return
-            qty = int(text)
-            minq = state.get("min",1)
-            if qty < minq:
-                bot.reply_to(m, f"Минимум {minq}"); return
-            unit = state.get("unit",1)
-            price_unit = float(state.get("price_unit",0.0))
-            # price = price_unit * (qty / unit)
-            price = price_unit * (qty / unit)
-            price = round(price, 2)
-            # ask for link if required by service (we'll always ask link for safety)
-            user_state[cid] = {"awaiting_link_for": True, "social": state["social"], "service_key": state["service_key"], "quantity": qty, "price_usd": price}
-            bot.reply_to(m, f"Цена: ${price:.2f}. Теперь отправьте ссылку на пост/аккаунт/канал (http/https):")
+            amount = int(text)
+            info = state["awaiting_amount_for"]
+            social = info["social"]; svc_key = info["service"]
+            svc_def = SERVICES_BY_SOCIAL.get(social, {}).get(svc_key)
+            if not svc_def:
+                bot.reply_to(m, "Ошибка услуги."); user_state.pop(cid,None); return
+            # compute price (simple: amount * base_unit_price). Here using price_usd per unit from svc_def
+            # Many services are priced per a chunk (e.g., per 1000 views). For demo we multiply price_usd by amount/1
+            # Adjust logic as needed.
+            base_price = float(svc_def.get("price_usd", 0.0))
+            # For typical cases amount may be in units; we'll compute total = base_price * (amount / 1)
+            total_price = round(base_price * amount, 2)
+            # store in user_state and ask link
+            user_state[cid] = {"awaiting_link_for_cart": True, "pending_item": {"social": social, "service": svc_key, "amount": amount, "price_usd": total_price}}
+            bot.send_message(cid, f"Итого: ${total_price:.2f}. Введите ссылку (http/https) для выполнения услуги:")
             return
 
-        # awaiting link
-        if state and state.get("awaiting_link_for"):
+        # awaiting link (for cart add or for single fixed package ordering)
+        if state and state.get("awaiting_link_for_cart"):
             link = text
             if not (link.startswith("http://") or link.startswith("https://")):
                 bot.reply_to(m, "Неверная ссылка. Должна начинаться с http/https"); return
-            social = state["social"]; service_key = state["service_key"]; qty = state["quantity"]; price = float(state["price_usd"])
-            # add to cart
-            cart_id = get_or_create_cart(cid)
-            add_item_to_cart(cart_id, social, service_key, qty, link, price)
+            pending = state["pending_item"]
+            add_to_cart(cid, pending["social"], pending["service"], pending["amount"], pending["price_usd"], link)
             user_state.pop(cid, None)
-            bot.reply_to(m, f"✅ Товар добавлен в корзину. Цена: ${price:.2f}\nПерейти в неё: '🧾 Корзина / Профиль'", reply_markup=main_menu_markup())
+            kb = types.InlineKeyboardMarkup(); kb.add(types.InlineKeyboardButton("Перейти в корзину", callback_data="view_cart")); kb.add(types.InlineKeyboardButton("🔙 Главное меню", callback_data="back_main"))
+            bot.reply_to(m, f"✅ Позиция добавлена в корзину: {pending['social']} {SERVICES_BY_SOCIAL.get(pending['social'],{}).get(pending['service'],{}).get('label',pending['service'])} x{pending['amount']} — ${pending['price_usd']:.2f}", reply_markup=kb)
             return
 
-        # awaiting support
+        # awaiting support msg
         if state and state.get("awaiting_support_msg"):
             user_state.pop(cid, None)
             uname = m.from_user.username or f"id{cid}"
@@ -944,7 +883,7 @@ def handle_text(m):
             req_id = opstate["awaiting_reply_for"]
             req = get_request_by_id(req_id)
             if not req:
-                bot.reply_to(m, "Обращение не найдено."); operator_state.pop(cid, None); return
+                bot.reply_to(m, "Обращение не найдено."); operator_state.pop(cid,None); return
             reply_text = text
             try:
                 bot.send_message(req["user_chat"], f"💬 Ответ от поддержки:\n{reply_text}")
@@ -953,7 +892,7 @@ def handle_text(m):
             add_support_message(req_id, cid, req["user_chat"], reply_text)
             close_request(req_id)
             bot.reply_to(m, "Ответ отправлен и обращение закрыто.")
-            operator_state.pop(cid, None)
+            operator_state.pop(cid,None)
             notify_all_operators_new_request()
             return
 
@@ -967,13 +906,13 @@ def handle_text(m):
             pass
 
 # -------------------------
-# Flask endpoints: CryptoBot IPN & Telegram webhook
+# Flask endpoints: IPN + webhook
 # -------------------------
 @app.route("/cryptobot/ipn", methods=["POST"])
 def cryptobot_ipn():
     try:
         payload = request.get_json(force=True)
-    except:
+    except Exception:
         return jsonify({"ok": False, "error": "bad json"}), 400
     # log
     try:
@@ -981,56 +920,30 @@ def cryptobot_ipn():
             f.write(json.dumps({"time": datetime.utcnow().isoformat(), "payload": payload}, ensure_ascii=False) + "\n")
     except Exception:
         pass
-
     invoice_id = None
     for k in ("invoiceId","invoice_id","id"):
         if k in payload:
             invoice_id = str(payload[k]); break
-
     status_field = payload.get("status") or payload.get("paymentStatus") or payload.get("state")
     paid_indicators = {"paid","success","confirmed","finished","complete"}
     st = str(status_field).lower() if status_field else ""
-    if any(p in st for p in paid_indicators) and invoice_id:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT * FROM invoices_map WHERE invoice_id = ?", (invoice_id,))
-        r = cur.fetchone()
-        if r:
-            # either order_id or cart_id is present
+    if invoice_id and any(p in st for p in paid_indicators):
+        mapping = get_invoice_mapping(invoice_id)
+        if mapping:
             try:
-                if r["order_id"]:
-                    oid = int(r["order_id"])
-                    cur.execute("UPDATE orders SET status = ? WHERE id = ?", ("оплачен", oid))
-                    conn.commit()
-                    # notify user
-                    cur2 = conn.cursor()
-                    cur2.execute("SELECT chat_id FROM orders WHERE id = ?", (oid,))
-                    rr = cur2.fetchone()
-                    if rr:
-                        try:
-                            bot.send_message(rr["chat_id"], f"✅ Оплата получена за заказ #{oid}. Спасибо.")
-                        except:
-                            pass
-                elif r["cart_id"]:
-                    cart_id = int(r["cart_id"])
-                    # mark cart paid and create orders from items
-                    cur.execute("SELECT * FROM cart_items WHERE cart_id = ?", (cart_id,))
-                    items = [dict(x) for x in cur.fetchall()]
-                    # for each item create an order with status paid
-                    for it in items:
-                        create_order_from_cart_item(r["chat_id"], it, status="оплачен")
-                    mark_cart_paid(cart_id)
-                    conn.commit()
-                    # notify user
-                    try:
-                        bot.send_message(r["chat_id"], f"✅ Оплата получена за корзину #{cart_id}. Заказы созданы.")
-                    except:
-                        pass
+                order_ids = json.loads(mapping["order_ids"])
+                mark_orders_paid(order_ids)
+                # notify user(s)
+                try:
+                    chatid = int(mapping["chat_id"])
+                    bot.send_message(chatid, f"✅ Оплата получена. Заказы: {', '.join(map(str,order_ids))}. Спасибо!")
+                except Exception:
+                    pass
             except Exception:
                 traceback.print_exc()
-        conn.close()
     return jsonify({"ok": True}), 200
 
-# telegram webhook endpoint (optional)
+# Telegram webhook endpoint
 @app.route("/" + BOT_TOKEN, methods=["POST"])
 def telegram_webhook():
     json_str = request.get_data().decode("utf-8")
@@ -1050,10 +963,10 @@ def index():
 # -------------------------
 def set_telegram_webhook():
     if not USE_WEBHOOK:
-        print("USE_WEBHOOK not set; skipping webhook")
+        print("USE_WEBHOOK not set; skipping Telegram webhook setup.")
         return
     if not WEB_DOMAIN:
-        print("WEB_DOMAIN empty; cannot set webhook")
+        print("WEB_DOMAIN empty; cannot set webhook.")
         return
     webhook_url = WEB_DOMAIN.rstrip("/") + "/" + BOT_TOKEN
     try:
@@ -1064,10 +977,10 @@ def set_telegram_webhook():
         print("Failed set webhook:", e)
 
 # -------------------------
-# Startup
+# Run
 # -------------------------
 if __name__ == "__main__":
-    print("Starting SaleTest full service")
+    print("Starting SaleTest_full service")
     init_db()
     if USE_WEBHOOK:
         set_telegram_webhook()
@@ -1075,125 +988,8 @@ if __name__ == "__main__":
         print("Running Flask (webhook mode) on port", port)
         app.run(host="0.0.0.0", port=port)
     else:
-        # run flask + polling
+        # run flask in thread and polling
         t = Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True)
         t.start()
         print("Running polling (local)...")
         bot.infinity_polling(timeout=60, long_polling_timeout=20)
-
-# -------------------------
-# Diagnostics / Maintenance / Utilities
-# -------------------------
-
-@app.route("/diag", methods=["GET"])
-def diag_info():
-    try:
-        info = {
-            "bot_username": bot.get_me().username if bot.get_me() else None,
-            "db_file_exists": os.path.exists(DB_FILE),
-            "file_size_bytes": os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0,
-            "active_threads": len(os.listdir("/proc/self/task")) if os.path.exists("/proc/self/task") else "n/a",
-            "time": datetime.utcnow().isoformat(),
-        }
-    except Exception as e:
-        info = {"error": str(e)}
-    return jsonify(info)
-
-def backup_db():
-    try:
-        if not os.path.exists(DB_FILE):
-            return
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{DB_FILE}.{ts}.bak"
-        with open(DB_FILE, "rb") as fsrc, open(backup_name, "wb") as fdst:
-            fdst.write(fsrc.read())
-        print(f"[Backup] Database backed up to {backup_name}")
-    except Exception as e:
-        print("[Backup] Error:", e)
-
-def periodic_backup(interval_sec=3600):
-    while True:
-        time.sleep(interval_sec)
-        backup_db()
-
-# -------------------------
-# Health / restart helpers
-# -------------------------
-@app.route("/health", methods=["GET"])
-def health_check():
-    return jsonify({"ok": True, "time": datetime.utcnow().isoformat()}), 200
-
-def restart_bot():
-    print("[Restart] Restarting bot process...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-# -------------------------
-# Database dump (for admin only)
-# -------------------------
-@bot.message_handler(commands=['dbdump'])
-def dump_db(m):
-    if m.from_user.id not in ADMIN_IDS:
-        bot.reply_to(m, "Нет доступа.")
-        return
-    try:
-        with open(DB_FILE, "rb") as f:
-            bot.send_document(m.chat.id, f)
-    except Exception as e:
-        bot.reply_to(m, f"Ошибка при выгрузке БД: {e}")
-
-# -------------------------
-# DB auto-backup thread
-# -------------------------
-Thread(target=periodic_backup, daemon=True).start()
-
-# -------------------------
-# Admin broadcast utility
-# -------------------------
-@bot.message_handler(commands=['broadcast'])
-def admin_broadcast(m):
-    if m.from_user.id not in ADMIN_IDS:
-        bot.reply_to(m, "Нет доступа.")
-        return
-    text = m.text.partition(' ')[2].strip()
-    if not text:
-        bot.reply_to(m, "Использование: /broadcast <текст>")
-        return
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT chat_id FROM users")
-    users = [r["chat_id"] for r in cur.fetchall()]
-    conn.close()
-    count = 0
-    for uid in users:
-        try:
-            bot.send_message(uid, text)
-            count += 1
-            time.sleep(0.05)
-        except:
-            continue
-    bot.reply_to(m, f"✅ Рассылка завершена, доставлено: {count}/{len(users)}")
-
-# -------------------------
-# Safety net for crash recovery
-# -------------------------
-def safe_polling():
-    while True:
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=25)
-        except Exception as e:
-            print("[Polling crash]", e)
-            time.sleep(5)
-
-# -------------------------
-# Final startup (redundant for safety)
-# -------------------------
-if __name__ == "__main__":
-    print("✅ SaleTest_full ready — running main loop...")
-    init_db()
-    if USE_WEBHOOK:
-        set_telegram_webhook()
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port)
-    else:
-        Thread(target=lambda: app.run(host="0.0.0.0", port=5000), daemon=True).start()
-        Thread(target=periodic_backup, daemon=True).start()
-        safe_polling()
